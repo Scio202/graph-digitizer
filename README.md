@@ -42,29 +42,6 @@ The pixel-to-data mapping assumes the axes are horizontal and vertical, which ho
 
 Automatic extraction assumes the curve is drawn at least as thick as any gridlines sharing its colour; that is how it tells them apart. If your gridlines are heavier than the curve, or two same-coloured curves overlap, place those points by hand. Tested on all-black plots (black curve, black gridlines, black axes) to a mean error under 0.2% of the y-range.
 
-## Hosting on GitHub Pages
-
-Two ways, pick one.
-
-Simple (no workflow needed):
-
-1. Create a repository and push these files to the default branch.
-2. In the repo, go to Settings, then Pages.
-3. Under "Build and deployment", set Source to "Deploy from a branch", pick your branch and the `/ (root)` folder, and Save.
-4. Wait a minute; your app is live at `https://<username>.github.io/<repo>/`.
-
-Automated (included workflow):
-
-This repo ships with `.github/workflows/pages.yml`, which deploys the site on every push to `main`. To use it, in Settings, then Pages, set Source to "GitHub Actions". Push to `main` and the Actions tab will show the deploy.
-
-## Running locally
-
-Open `index.html` directly in a browser, or serve the folder:
-
-    python3 -m http.server 8000
-
-then visit `http://localhost:8000`.
-
 ## Files
 
 - `index.html` - markup and layout
