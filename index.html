@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Graph Digitizer</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header id="topbar">
+  <h1>Graph Digitizer</h1>
+  <span class="tag">image &rarr; data &rarr; CSV</span>
+</header>
+
+<main id="app">
+  <aside id="sidebar">
+
+    <section class="panel">
+      <h2><span class="step">1</span> Load a graph image</h2>
+      <div id="dropzone">
+        <p>Drag &amp; drop an image here,<br>paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>, or</p>
+        <label class="btn">Choose file<input type="file" id="fileInput" accept="image/*" hidden></label>
+      </div>
+    </section>
+
+    <section class="panel" id="calibPanel">
+      <h2><span class="step">2</span> Calibrate the axes</h2>
+      <label class="corner-toggle"><input type="checkbox" id="cornerMode"> 2-point corner mode (pick two opposite corners)</label>
+      <p class="hint" id="calibHint">Click a "Set" button, click that reference point on the image, then type its real value.</p>
+
+      <div class="calib-buttons" id="buttons4">
+        <button class="cbtn" data-cal="X1">Set X&#8321;</button>
+        <button class="cbtn" data-cal="X2">Set X&#8322;</button>
+        <button class="cbtn" data-cal="Y1">Set Y&#8321;</button>
+        <button class="cbtn" data-cal="Y2">Set Y&#8322;</button>
+      </div>
+      <div class="calib-buttons" id="buttons2" hidden>
+        <button class="cbtn wide" data-cal="BL">Set bottom-left corner</button>
+        <button class="cbtn wide" data-cal="TR">Set top-right corner</button>
+      </div>
+
+      <div class="vals">
+        <label><span id="lblX1">X&#8321; value</span><input type="number" step="any" id="valX1"></label>
+        <label><span id="lblX2">X&#8322; value</span><input type="number" step="any" id="valX2"></label>
+        <label><span id="lblY1">Y&#8321; value</span><input type="number" step="any" id="valY1"></label>
+        <label><span id="lblY2">Y&#8322; value</span><input type="number" step="any" id="valY2"></label>
+      </div>
+
+      <div class="log-row">
+        <label><input type="checkbox" id="logX"> log&#8321;&#8320; X</label>
+        <label><input type="checkbox" id="logY"> log&#8321;&#8320; Y</label>
+      </div>
+      <div id="calibStatus" class="status">Not calibrated.</div>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">3</span> Data series</h2>
+      <div id="seriesList"></div>
+      <button class="btn small" id="addSeries">+ Add series</button>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">4</span> Extract points</h2>
+      <div class="mode-row">
+        <button class="mbtn" data-mode="points" title="Click on the curve to add points">Add</button>
+        <button class="mbtn" data-mode="delete" title="Click a point to remove it">Delete</button>
+        <button class="mbtn" data-mode="pan" title="Drag to pan">Pan</button>
+      </div>
+      <button class="btn small" id="undoPoint">Undo last point</button>
+      <button class="btn small" id="clearSeries">Clear this series</button>
+
+      <details id="autoBox">
+        <summary>Automatic extraction (by colour)</summary>
+        <p class="hint">Pick the curve colour, then run. Best for a single clean line within the calibrated area.</p>
+        <div class="auto-row">
+          <button class="btn small" id="eyedropper">Pick colour</button>
+          <span id="colorSwatch" class="swatch"></span>
+        </div>
+        <label class="slider">Colour tolerance <span id="tolVal">40</span>
+          <input type="range" id="tolerance" min="5" max="150" value="40">
+        </label>
+        <label class="slider">X step (px) <span id="stepVal">2</span>
+          <input type="range" id="xstep" min="1" max="15" value="2">
+        </label>
+        <button class="btn small primary" id="runAuto">Run auto extract</button>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">5</span> Export</h2>
+      <label class="slider">Format
+        <select id="csvFormat">
+          <option value="wide">Wide (X,Y columns per series)</option>
+          <option value="long">Long (series,x,y)</option>
+        </select>
+      </label>
+      <button class="btn primary" id="exportCsv">Download CSV</button>
+      <button class="btn small" id="copyCsv">Copy to clipboard</button>
+    </section>
+  </aside>
+
+  <div id="stage">
+    <div id="toolbar">
+      <button class="tbtn" id="zoomOut">&minus;</button>
+      <span id="zoomLabel">100%</span>
+      <button class="tbtn" id="zoomIn">+</button>
+      <button class="tbtn" id="zoomFit">Fit</button>
+      <span id="cursorReadout" class="readout">&mdash;</span>
+    </div>
+    <div id="canvasWrap">
+      <canvas id="canvas"></canvas>
+      <div id="placeholder">Load an image to begin.</div>
+    </div>
+    <canvas id="loupe" width="150" height="150"></canvas>
+  </div>
+</main>
+
+<div id="dataDrawer">
+  <div id="dataDrawerHandle">Data table <span id="pointCount">(0 points)</span></div>
+  <div id="dataTableWrap"><table id="dataTable"></table></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
