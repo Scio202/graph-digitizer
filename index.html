@@ -29,14 +29,14 @@
       <p class="hint" id="calibHint">Click a "Set" button, click that reference point on the image, then type its real value.</p>
 
       <div class="calib-buttons" id="buttons4">
-        <button class="cbtn" data-cal="X1">Set X&#8321;</button>
-        <button class="cbtn" data-cal="X2">Set X&#8322;</button>
-        <button class="cbtn" data-cal="Y1">Set Y&#8321;</button>
-        <button class="cbtn" data-cal="Y2">Set Y&#8322;</button>
+        <div class="cpair"><button class="cbtn" data-cal="X1">Set X&#8321;</button><button class="abtn" data-auto="X1" title="Auto-detect this point from the axis ticks">Auto</button></div>
+        <div class="cpair"><button class="cbtn" data-cal="X2">Set X&#8322;</button><button class="abtn" data-auto="X2" title="Auto-detect this point from the axis ticks">Auto</button></div>
+        <div class="cpair"><button class="cbtn" data-cal="Y1">Set Y&#8321;</button><button class="abtn" data-auto="Y1" title="Auto-detect this point from the axis ticks">Auto</button></div>
+        <div class="cpair"><button class="cbtn" data-cal="Y2">Set Y&#8322;</button><button class="abtn" data-auto="Y2" title="Auto-detect this point from the axis ticks">Auto</button></div>
       </div>
       <div class="calib-buttons" id="buttons2" hidden>
-        <button class="cbtn wide" data-cal="BL">Set bottom-left corner</button>
-        <button class="cbtn wide" data-cal="TR">Set top-right corner</button>
+        <div class="cpair wide"><button class="cbtn" data-cal="BL">Set bottom-left corner</button><button class="abtn" data-auto="BL" title="Auto-detect from the axes">Auto</button></div>
+        <div class="cpair wide"><button class="cbtn" data-cal="TR">Set top-right corner</button><button class="abtn" data-auto="TR" title="Auto-detect from the axes">Auto</button></div>
       </div>
 
       <div class="vals">
@@ -62,16 +62,20 @@
     <section class="panel">
       <h2><span class="step">4</span> Extract points</h2>
       <div class="mode-row">
-        <button class="mbtn" data-mode="points" title="Click on the curve to add points">Add</button>
+        <button class="mbtn" data-mode="points" title="Click to add points; drag a point to move it; arrow keys nudge, Del removes (A)">Add</button>
         <button class="mbtn" data-mode="delete" title="Click a point to remove it">Delete</button>
+        <button class="mbtn" data-mode="trace" title="Click a curve: picks its colour and auto-traces it (T)">Trace</button>
+        <button class="mbtn" data-mode="lasso" title="Drag to draw a freeform region for the active series; auto extract then only looks inside it">Lasso</button>
         <button class="mbtn" data-mode="pan" title="Drag to pan">Pan</button>
       </div>
+      <label class="chk"><input type="checkbox" id="snap"> Snap clicks to picked colour</label>
       <button class="btn small" id="undoPoint">Undo last point</button>
       <button class="btn small" id="clearSeries">Clear this series</button>
+      <button class="btn small" id="clearRegion">Clear lasso region</button>
 
       <details id="autoBox">
         <summary>Automatic extraction (by colour)</summary>
-        <p class="hint">Pick the curve colour, then run. Best for a single clean line within the calibrated area.</p>
+        <p class="hint">Pick the curve colour, then run. Searches the lasso region of the active series, or the calibrated area if none. With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
         <div class="auto-row">
           <button class="btn small" id="eyedropper">Pick colour</button>
           <span id="colorSwatch" class="swatch"></span>
@@ -82,7 +86,10 @@
         <label class="slider">X step (px) <span id="stepVal">2</span>
           <input type="range" id="xstep" min="1" max="15" value="2">
         </label>
+        <label class="slider">Same-coloured curves <input type="number" id="nCurves" min="1" max="12" value="1" class="num"></label>
+        <label class="slider">Bridge dashed gaps up to (px, 0 = off) <input type="number" id="bridge" min="0" max="200" value="0" class="num"></label>
         <button class="btn small primary" id="runAuto">Run auto extract</button>
+        <button class="btn small" id="runRegions" title="Run on every series that has a lasso region, one curve each">Run on all lasso regions</button>
       </details>
     </section>
 
@@ -94,6 +101,7 @@
           <option value="long">Long (series,x,y)</option>
         </select>
       </label>
+      <label class="slider">File name <input type="text" id="csvName" value="digitized-data" class="num" placeholder="digitized-data"></label>
       <button class="btn primary" id="exportCsv">Download CSV</button>
       <button class="btn small" id="copyCsv">Copy to clipboard</button>
     </section>
@@ -105,6 +113,9 @@
       <span id="zoomLabel">100%</span>
       <button class="tbtn" id="zoomIn">+</button>
       <button class="tbtn" id="zoomFit">Fit</button>
+      <button class="tbtn tw" id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
+      <button class="tbtn tw" id="redoBtn" title="Redo (Ctrl+Y)">Redo</button>
+      <label class="chk" title="Draw a connected line through each series to check the fit"><input type="checkbox" id="showFit"> Overlay</label>
       <span id="cursorReadout" class="readout">&mdash;</span>
     </div>
     <div id="canvasWrap">

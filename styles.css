@@ -97,3 +97,20 @@ details#autoBox summary{cursor:pointer;font-size:12px;color:var(--accent)}
 .vals{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
 .vals label{display:flex;flex-direction:column;font-size:11px;color:var(--muted);gap:2px}
 .vals input{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px;font-size:12px;width:100%}
+
+/* --- v4: auto-calibration, lasso, file name --- */
+.cpair{display:flex;gap:4px}
+.cpair .cbtn{flex:1}
+.cpair.wide{grid-column:span 2}
+.abtn{background:var(--panel);color:var(--accent2);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;cursor:pointer}
+.abtn:hover{border-color:var(--accent2)}
+.num{width:100%;margin-top:4px;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px;font-size:12px}
+.series-item .sel{font-size:12px;color:var(--muted)}
+#canvas.mode-lasso{cursor:crosshair}
+
+/* --- v5 --- */
+.mode-row{flex-wrap:wrap}.mode-row .mbtn{min-width:56px}
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin:8px 0 2px;cursor:pointer}
+#toolbar .chk{margin:0}
+.tbtn.tw{width:auto;padding:0 10px;font-size:12px}
+#canvas.mode-trace{cursor:cell}
