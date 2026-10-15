@@ -75,7 +75,14 @@
 
       <details id="autoBox">
         <summary>Automatic extraction (by colour)</summary>
-        <p class="hint">Pick the curve colour, then run. Searches the lasso region of the active series, or the calibrated area if none. With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
+        <p class="hint">Pick the curve or marker colour, then run. Searches the lasso region of the active series, or the calibrated area if none. With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
+        <label class="slider">Extract
+          <select id="autoKind">
+            <option value="curve">A curve (line)</option>
+            <option value="markers">Markers (circles, triangles, squares; filled or outline)</option>
+          </select>
+        </label>
+        <label class="slider">Marker size (px, 0 = auto; Trace on a marker measures it) <input type="number" id="markerSize" min="0" max="200" value="0" class="num"></label>
         <div class="auto-row">
           <button class="btn small" id="eyedropper">Pick colour</button>
           <span id="colorSwatch" class="swatch"></span>

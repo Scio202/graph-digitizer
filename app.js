@@ -341,13 +341,15 @@ function setAutoColor(col){ state.autoColor=col; $("colorSwatch").style.backgrou
 function traceAt(px,py){
   if(!state.imgData){ alert("Load an image first."); return; }
   const {data,width:W,height:H}=state.imgData, bg=bgRGB(), cx=Math.round(px), cy=Math.round(py);
-  let best=null, bd=-1;
+  let best=null, bd=-1, bx=cx, by=cy;
   for(let y=Math.max(0,cy-3);y<=Math.min(H-1,cy+3);y++) for(let x=Math.max(0,cx-3);x<=Math.min(W-1,cx+3);x++){
     const i=(y*W+x)*4, d=(data[i]-bg.r)**2+(data[i+1]-bg.g)**2+(data[i+2]-bg.b)**2;
-    if(d>bd){ bd=d; best={r:data[i],g:data[i+1],b:data[i+2]}; }
+    if(d>bd){ bd=d; best={r:data[i],g:data[i+1],b:data[i+2]}; bx=x; by=y; }
   }
   if(!best||bd<30*30*3){ alert("That spot looks like background. Click directly on the curve."); return; }
-  setAutoColor(best); $("runAuto").onclick();
+  setAutoColor(best);
+  if($("autoKind").value==="markers"){ const s=measureMarker(bx,by); if(s) $("markerSize").value=s; }
+  $("runAuto").onclick();
 }
 // nearest pixel of the picked colour within a small radius, refined to the centre of its stroke
 function snapPoint(px,py){
@@ -429,23 +431,133 @@ function buildMask(poly){
   return m;
 }
 
+// search area for ser: its lasso (bbox + mask) if set, else the calibrated box inset from the axes
+function regionOf(ser){
+  const W=state.imgData.width, H=state.imgData.height;
+  if(ser.sel){
+    const xs=ser.sel.map(p=>p.px), ys=ser.sel.map(p=>p.py);
+    return { x0:Math.max(0,Math.floor(Math.min(...xs))), x1:Math.min(W-1,Math.ceil(Math.max(...xs))),
+             y0:Math.max(0,Math.floor(Math.min(...ys))), y1:Math.min(H-1,Math.ceil(Math.max(...ys))), mask:buildMask(ser.sel) };
+  }
+  const r=regionBox(), inset=3;
+  return { x0:Math.max(0,r.x0+inset), x1:Math.min(W-1,r.x1-inset), y0:Math.max(0,r.y0+inset), y1:Math.min(H-1,r.y1-inset), mask:null };
+}
+
+// ---- marker detection (circles / triangles / squares, filled or outline) ----
+// connected components (8-neighbour) of a w*h 0/1 mask -> [{minx,maxx,miny,maxy,area}]
+function components(m,w,h){
+  const seen=new Uint8Array(w*h), stack=new Int32Array(w*h), out=[];
+  for(let s=0;s<w*h;s++){
+    if(!m[s]||seen[s]) continue;
+    let sp=0, c={minx:w,maxx:0,miny:h,maxy:0,area:0}; stack[sp++]=s; seen[s]=1;
+    while(sp){
+      const i=stack[--sp], x=i%w, y=(i-x)/w;
+      c.area++; if(x<c.minx)c.minx=x; if(x>c.maxx)c.maxx=x; if(y<c.miny)c.miny=y; if(y>c.maxy)c.maxy=y;
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+        const nx=x+dx, ny=y+dy; if(nx<0||ny<0||nx>=w||ny>=h) continue;
+        const n=ny*w+nx; if(m[n]&&!seen[n]){ seen[n]=1; stack[sp++]=n; }
+      }
+    }
+    out.push(c);
+  }
+  return out;
+}
+// outline markers -> solid: anything not reachable from the border through empty pixels is "inside"
+function fillHoles(m,w,h){
+  const out=new Uint8Array(m), seen=new Uint8Array(w*h), stack=new Int32Array(w*h); let sp=0;
+  const push=i=>{ if(!m[i]&&!seen[i]){ seen[i]=1; stack[sp++]=i; } };
+  for(let x=0;x<w;x++){ push(x); push((h-1)*w+x); }
+  for(let y=0;y<h;y++){ push(y*w); push(y*w+w-1); }
+  while(sp){
+    const i=stack[--sp], x=i%w, y=(i-x)/w;
+    if(x>0)push(i-1); if(x<w-1)push(i+1); if(y>0)push(i-w); if(y<h-1)push(i+w);
+  }
+  for(let i=0;i<w*h;i++) if(!m[i]&&!seen[i]) out[i]=1;
+  return out;
+}
+// square erosion / dilation of radius r (separable; pixels outside the area are ignored)
+function boxFilter(src,w,h,r,erode){
+  const tmp=new Uint8Array(w*h), out=new Uint8Array(w*h);
+  const pass=(a,b,horiz)=>{
+    const n1=horiz?w:h, n2=horiz?h:w;
+    for(let u=0;u<n2;u++) for(let v=0;v<n1;v++){
+      let acc=erode?1:0;
+      for(let k=-r;k<=r;k++){
+        const q=v+k; if(q<0||q>=n1) continue;
+        const val=a[horiz?u*w+q:q*w+u];
+        if(erode){ if(!val){ acc=0; break; } } else if(val){ acc=1; break; }
+      }
+      b[horiz?u*w+v:v*w+u]=acc;
+    }
+  };
+  pass(src,tmp,true); pass(tmp,out,false);
+  return out;
+}
+function colorMask(x0,y0,w,h,mask){
+  const {data,width:W}=state.imgData, {r,g,b}=state.autoColor, t2=(+$("tolerance").value)**2*3;
+  const m=new Uint8Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const i=(y+y0)*W+x+x0;
+    if(mask&&!mask[i]) continue;
+    const dr=data[i*4]-r, dg=data[i*4+1]-g, db=data[i*4+2]-b;
+    if(dr*dr+dg*dg+db*db<=t2) m[y*w+x]=1;
+  }
+  return m;
+}
+// Find every blob of the picked colour in ser's region and return its centre. Shape-agnostic:
+// holes are filled (outline markers), then an opening removes thin lines/text that touch the markers.
+function detectMarkers(ser){
+  const {x0,x1,y0,y1,mask}=regionOf(ser), w=x1-x0+1, h=y1-y0+1;
+  if(w<3||h<3){ alert("The search area is too small."); return null; }
+  const m=colorMask(x0,y0,w,h,mask);
+  let d=+$("markerSize").value;
+  if(!(d>0)){   // auto size: median of the compact blobs
+    const s=components(m,w,h).map(c=>({bw:c.maxx-c.minx+1,bh:c.maxy-c.miny+1}))
+      .filter(c=>Math.max(c.bw,c.bh)>=4&&Math.max(c.bw,c.bh)<=80&&Math.max(c.bw,c.bh)<=1.6*Math.min(c.bw,c.bh))
+      .map(c=>Math.max(c.bw,c.bh)).sort((a,b)=>a-b);
+    d=s.length?s[s.length>>1]:10;
+    $("markerSize").placeholder="auto: "+d;
+  }
+  const f=fillHoles(m,w,h), rho=Math.max(1,Math.floor(d*0.2));
+  const core=boxFilter(boxFilter(f,w,h,rho,true),w,h,rho,false);   // opening
+  const near=boxFilter(core,w,h,rho,false);
+  for(let i=0;i<f.length;i++) near[i]&=f[i];                       // restore tips / corners
+  const pts=components(near,w,h)
+    .filter(c=>c.area>=Math.max(6,0.15*d*d)&&c.maxx-c.minx+1<=2.2*d&&c.maxy-c.miny+1<=2.2*d)
+    .map(c=>({px:x0+(c.minx+c.maxx)/2,py:y0+(c.miny+c.maxy)/2}))
+    .sort((a,b)=>a.px-b.px);
+  if(!pts.length){ alert("No markers found. Check the colour, tolerance and marker size, or pick a marker with Trace."); return null; }
+  return pts;
+}
+// click on a marker: measure its size from the connected blob of the picked colour around (cx,cy)
+function measureMarker(cx,cy){
+  const {width:W,height:H}=state.imgData, R=80;
+  const x0=Math.max(0,cx-R), y0=Math.max(0,cy-R), w=Math.min(W,cx+R+1)-x0, h=Math.min(H,cy+R+1)-y0;
+  const m=colorMask(x0,y0,w,h,null);
+  const seed=(cy-y0)*w+(cx-x0); if(!m[seed]) return 0;
+  const only=new Uint8Array(w*h), stack=[seed]; only[seed]=1;
+  while(stack.length){
+    const i=stack.pop(), x=i%w, y=(i-x)/w;
+    for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+      const nx=x+dx, ny=y+dy; if(nx<0||ny<0||nx>=w||ny>=h) continue;
+      const n=ny*w+nx; if(m[n]&&!only[n]){ only[n]=1; stack.push(n); }
+    }
+  }
+  const c=components(only,w,h)[0], s=Math.max(c.maxx-c.minx,c.maxy-c.miny)+1;
+  // if the marker is joined to a line its bbox is meaningless; estimate from the largest square that fits inside
+  const filled=fillHoles(only,w,h);
+  let k=0; while(k<40 && boxFilter(filled,w,h,k+1,true).some(v=>v)) k++;
+  const est=Math.round(1.4*(2*k+1));
+  return s<=2.2*est ? s : est;
+}
+
 // Trace up to n same-coloured curves inside ser's region (lasso if set, else the calibrated box).
 // Returns an array of point lists (top curve first) or null on failure.
 function traceCurves(ser, n){
   const tol=+$("tolerance").value, step=+$("xstep").value;
   const {data,width:W,height:H}=state.imgData, tol2=tol*tol*3;
   const {r:tr,g:tg,b:tb}=state.autoColor, gap=2;
-  let x0,x1,y0,y1, mask=null;
-  if(ser.sel){
-    const xs=ser.sel.map(p=>p.px), ys=ser.sel.map(p=>p.py);
-    x0=Math.max(0,Math.floor(Math.min(...xs))); x1=Math.min(W-1,Math.ceil(Math.max(...xs)));
-    y0=Math.max(0,Math.floor(Math.min(...ys))); y1=Math.min(H-1,Math.ceil(Math.max(...ys)));
-    mask=buildMask(ser.sel);
-  } else {
-    const r=regionBox(), inset=3;
-    x0=Math.max(0,r.x0+inset); x1=Math.min(W-1,r.x1-inset);
-    y0=Math.max(0,r.y0+inset); y1=Math.min(H-1,r.y1-inset);
-  }
+  const {x0,x1,y0,y1,mask}=regionOf(ser);
   const maxThick=Math.max(15,(y1-y0)*0.5);
 
   // 1. per column, cluster matched rows into contiguous runs
@@ -519,8 +631,9 @@ function traceCurves(ser, n){
 
 // Trace into series `si`; extra curves go into the following series (created if missing).
 function extractInto(si, n){
-  const tracks=traceCurves(state.series[si], n);
-  if(!tracks) return false;
+  const markers=$("autoKind").value==="markers";
+  const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean) : traceCurves(state.series[si], n);
+  if(!tracks||!tracks.length) return false;
   const act=state.active;
   tracks.forEach((pts,k)=>{
     while(si+k>=state.series.length) addSeries();
@@ -531,13 +644,13 @@ function extractInto(si, n){
 }
 function autoPrecheck(){
   if(!state.imgData){ alert("Load an image first (auto extract needs pixel access)."); return false; }
-  if(!state.autoColor){ alert("Pick the curve colour first."); return false; }
+  if(!state.autoColor){ alert("Pick the curve / marker colour first (Pick colour, or the Trace tool)."); return false; }
   return true;
 }
 $("runAuto").onclick = ()=>{
   if(!autoPrecheck()) return;
   if(!state.series[state.active]){ alert("Add a series first."); return; }
-  const n=Math.max(1,Math.min(12,Math.round(+$("nCurves").value)||1));
+  const n=$("autoKind").value==="markers" ? 1 : Math.max(1,Math.min(12,Math.round(+$("nCurves").value)||1));
   const clobber=state.series.slice(state.active+1,state.active+n).some(s=>s.points.length);
   if(clobber && !confirm("Extra curves are written into the next series, replacing their points. Continue?")) return;
   extractInto(state.active,n);
