@@ -462,18 +462,39 @@ function components(m,w,h){
   }
   return out;
 }
-// outline markers -> solid: anything not reachable from the border through empty pixels is "inside"
-function fillHoles(m,w,h){
-  const out=new Uint8Array(m), seen=new Uint8Array(w*h), stack=new Int32Array(w*h); let sp=0;
-  const push=i=>{ if(!m[i]&&!seen[i]){ seen[i]=1; stack[sp++]=i; } };
-  for(let x=0;x<w;x++){ push(x); push((h-1)*w+x); }
-  for(let y=0;y<h;y++){ push(y*w); push(y*w+w-1); }
-  while(sp){
-    const i=stack[--sp], x=i%w, y=(i-x)/w;
-    if(x>0)push(i-1); if(x<w-1)push(i+1); if(y>0)push(i-w); if(y<h-1)push(i+w);
+// outline markers -> solid: background pockets that don't reach the border and are no bigger than maxArea
+// (so a closed plot frame is NOT filled in, but the inside of a ring is)
+function fillHoles(m,w,h,maxArea){
+  const out=new Uint8Array(m), seen=new Uint8Array(w*h), stack=new Int32Array(w*h);
+  const flood=(start,keep)=>{
+    let sp=0, n=0; stack[sp++]=start; seen[start]=1; const cells=keep?[]:null;
+    while(sp){
+      const i=stack[--sp], x=i%w, y=(i-x)/w; n++; if(keep) cells.push(i);
+      const go=k=>{ if(!m[k]&&!seen[k]){ seen[k]=1; stack[sp++]=k; } };
+      if(x>0)go(i-1); if(x<w-1)go(i+1); if(y>0)go(i-w); if(y<h-1)go(i+w);
+    }
+    return cells;
+  };
+  for(let x=0;x<w;x++){ for(const i of [x,(h-1)*w+x]) if(!m[i]&&!seen[i]) flood(i,false); }
+  for(let y=0;y<h;y++){ for(const i of [y*w,y*w+w-1]) if(!m[i]&&!seen[i]) flood(i,false); }
+  for(let s=0;s<w*h;s++){
+    if(m[s]||seen[s]) continue;
+    const cells=flood(s,true);
+    if(cells.length<=maxArea) for(const i of cells) out[i]=1;
   }
-  for(let i=0;i<w*h;i++) if(!m[i]&&!seen[i]) out[i]=1;
   return out;
+}
+// chamfer distance (in px) from each foreground pixel to the nearest background pixel
+function distMap(m,w,h){
+  const D=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++) D[i]=m[i]?1e9:0;
+  const at=(x,y,add,i)=>{ if(x<0||y<0||x>=w||y>=h) return 1e9; return D[y*w+x]+add; };
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){ const i=y*w+x; if(!D[i]) continue;
+    D[i]=Math.min(D[i],at(x-1,y,3),at(x-1,y-1,4),at(x,y-1,3),at(x+1,y-1,4)); }
+  for(let y=h-1;y>=0;y--) for(let x=w-1;x>=0;x--){ const i=y*w+x; if(!D[i]) continue;
+    D[i]=Math.min(D[i],at(x+1,y,3),at(x+1,y+1,4),at(x,y+1,3),at(x-1,y+1,4)); }
+  for(let i=0;i<w*h;i++) D[i]/=3;
+  return D;
 }
 // square erosion / dilation of radius r (separable; pixels outside the area are ignored)
 function boxFilter(src,w,h,r,erode){
@@ -504,28 +525,37 @@ function colorMask(x0,y0,w,h,mask){
   }
   return m;
 }
-// Find every blob of the picked colour in ser's region and return its centre. Shape-agnostic:
-// holes are filled (outline markers), then an opening removes thin lines/text that touch the markers.
+// Find every marker of the picked colour in ser's region and return its centre. Shape-agnostic:
+// pockets are filled (outline markers), an opening strips thin things that touch the markers (error bars,
+// connecting lines, axes, text), then each marker is located as a peak of the distance map, which also
+// separates markers that touch or overlap.
 function detectMarkers(ser){
   const {x0,x1,y0,y1,mask}=regionOf(ser), w=x1-x0+1, h=y1-y0+1;
   if(w<3||h<3){ alert("The search area is too small."); return null; }
   const m=colorMask(x0,y0,w,h,mask);
   let d=+$("markerSize").value;
-  if(!(d>0)){   // auto size: median of the compact blobs
-    const s=components(m,w,h).map(c=>({bw:c.maxx-c.minx+1,bh:c.maxy-c.miny+1}))
-      .filter(c=>Math.max(c.bw,c.bh)>=4&&Math.max(c.bw,c.bh)<=80&&Math.max(c.bw,c.bh)<=1.6*Math.min(c.bw,c.bh))
-      .map(c=>Math.max(c.bw,c.bh)).sort((a,b)=>a-b);
-    d=s.length?s[s.length>>1]:10;
+  if(!(d>0)){   // auto size: the thickest solid part of the picked colour
+    const D=distMap(fillHoles(m,w,h,400),w,h); let mx=0; for(let i=0;i<D.length;i++) if(D[i]>mx&&D[i]<1e8) mx=D[i];
+    d=Math.max(8,Math.round(2*mx));
     $("markerSize").placeholder="auto: "+d;
   }
-  const f=fillHoles(m,w,h), rho=Math.max(1,Math.floor(d*0.2));
+  const f=fillHoles(m,w,h,d*d), rho=Math.max(1,Math.floor(d*0.2));
   const core=boxFilter(boxFilter(f,w,h,rho,true),w,h,rho,false);   // opening
-  const near=boxFilter(core,w,h,rho,false);
-  for(let i=0;i<f.length;i++) near[i]&=f[i];                       // restore tips / corners
-  const pts=components(near,w,h)
-    .filter(c=>c.area>=Math.max(6,0.15*d*d)&&c.maxx-c.minx+1<=2.2*d&&c.maxy-c.miny+1<=2.2*d)
-    .map(c=>({px:x0+(c.minx+c.maxx)/2,py:y0+(c.miny+c.maxy)/2}))
-    .sort((a,b)=>a.px-b.px);
+  const D=distMap(core,w,h), minR=0.3*d, sep=0.6*d;
+  const cand=[]; for(let i=0;i<D.length;i++) if(D[i]>=minR&&D[i]<1e8) cand.push(i);
+  cand.sort((a,b)=>D[b]-D[a]);
+  const seeds=[];
+  for(const i of cand){
+    const x=i%w, y=(i-x)/w;
+    if(seeds.every(s=>(s.x-x)**2+(s.y-y)**2>=sep*sep)) seeds.push({x,y,r:D[i]});
+  }
+  // centre = middle of the flat top of the distance peak
+  const pts=seeds.map(s=>{
+    let sx=0,sy=0,c=0, R=Math.ceil(0.4*d);
+    for(let y=Math.max(0,s.y-R);y<=Math.min(h-1,s.y+R);y++) for(let x=Math.max(0,s.x-R);x<=Math.min(w-1,s.x+R);x++)
+      if(D[y*w+x]>=s.r-1){ sx+=x; sy+=y; c++; }
+    return {px:x0+sx/c,py:y0+sy/c};
+  }).sort((a,b)=>a.px-b.px);
   if(!pts.length){ alert("No markers found. Check the colour, tolerance and marker size, or pick a marker with Trace."); return null; }
   return pts;
 }
@@ -544,9 +574,10 @@ function measureMarker(cx,cy){
     }
   }
   const c=components(only,w,h)[0], s=Math.max(c.maxx-c.minx,c.maxy-c.miny)+1;
-  // if the marker is joined to a line its bbox is meaningless; estimate from the largest square that fits inside
-  const filled=fillHoles(only,w,h);
-  let k=0; while(k<40 && boxFilter(filled,w,h,k+1,true).some(v=>v)) k++;
+  // if the marker is joined to lines its bbox is meaningless; estimate from the largest square that fits inside
+  const inscribed=b=>{ let k=0; while(k<40 && boxFilter(b,w,h,k+1,true).some(v=>v)) k++; return k; };
+  let k=inscribed(only);
+  if(k<3) k=inscribed(fillHoles(only,w,h,R*R));   // thin outline marker: fill its inside first
   const est=Math.round(1.4*(2*k+1));
   return s<=2.2*est ? s : est;
 }
