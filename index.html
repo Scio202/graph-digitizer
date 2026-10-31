@@ -50,6 +50,11 @@
         <label><input type="checkbox" id="logX"> log&#8321;&#8320; X</label>
         <label><input type="checkbox" id="logY"> log&#8321;&#8320; Y</label>
       </div>
+      <div class="auto-row">
+        <button class="btn small" id="ocrBtn" title="Read the number next to each placed point (needs the OCR model, ~3 MB on first use)">Read values (OCR)</button>
+        <label class="chk"><input type="checkbox" id="ocrAuto"> after Auto</label>
+      </div>
+      <div id="ocrStatus" class="hint"></div>
       <div id="calibStatus" class="status">Not calibrated.</div>
     </section>
 
@@ -65,17 +70,30 @@
         <button class="mbtn" data-mode="points" title="Click to add points; drag a point to move it; arrow keys nudge, Del removes (A)">Add</button>
         <button class="mbtn" data-mode="delete" title="Click a point to remove it">Delete</button>
         <button class="mbtn" data-mode="trace" title="Click a curve: picks its colour and auto-traces it (T)">Trace</button>
-        <button class="mbtn" data-mode="lasso" title="Drag to draw a freeform region for the active series; auto extract then only looks inside it">Lasso</button>
+        <button class="mbtn" data-mode="lasso" title="Drag a freeform region for the active series; auto extract then only looks inside it. Shift adds, Alt subtracts (L)">Lasso</button>
+        <button class="mbtn" data-mode="box" title="Drag a rectangle region. Shift adds, Alt subtracts (B)">Box</button>
+        <button class="mbtn" data-mode="bound" title="Drag the bound line / its nodes (G)">Bound</button>
         <button class="mbtn" data-mode="pan" title="Drag to pan">Pan</button>
       </div>
+      <label class="chk"><input type="checkbox" id="selNeg"> Lasso / Box subtracts (negative; or hold Alt, Shift adds)</label>
       <label class="chk"><input type="checkbox" id="snap"> Snap clicks to picked colour</label>
+      <details id="boundBox">
+        <summary>Look only above / below another curve</summary>
+        <p class="hint">Uses a digitized series as the boundary for the active series. Drag the dashed line (or its nodes) with the Bound tool; the offset moves the whole line.</p>
+        <label class="slider">Reference series <select id="boundRef"></select></label>
+        <label class="slider">Search <select id="boundSide"><option value="above">above it (smaller y on screen)</option><option value="below">below it</option></select></label>
+        <label class="slider">Offset (px, + = down) <input type="number" id="boundOff" step="0.5" value="0" class="num"></label>
+        <button class="btn small primary" id="boundApply">Apply bound to active series</button>
+        <button class="btn small" id="boundClear">Remove bound</button>
+        <div id="boundInfo" class="hint"></div>
+      </details>
       <button class="btn small" id="undoPoint">Undo last point</button>
       <button class="btn small" id="clearSeries">Clear this series</button>
-      <button class="btn small" id="clearRegion">Clear lasso region</button>
+      <button class="btn small" id="clearRegion">Clear lasso / box regions</button>
 
       <details id="autoBox">
         <summary>Automatic extraction (by colour)</summary>
-        <p class="hint">Pick the curve or marker colour, then run. Searches the lasso region of the active series, or the calibrated area if none. With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
+        <p class="hint">Pick the curve or marker colour, then run. Searches the lasso / box regions and bound of the active series, or the calibrated area if none. Close curves are tracked probabilistically (a curve will not steal ink from another curve). With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
         <label class="slider">Extract
           <select id="autoKind">
             <option value="curve">A curve (line)</option>
@@ -90,13 +108,13 @@
         <label class="slider">Colour tolerance <span id="tolVal">40</span>
           <input type="range" id="tolerance" min="5" max="150" value="40">
         </label>
-        <label class="slider">X step (px) <span id="stepVal">2</span>
-          <input type="range" id="xstep" min="1" max="15" value="2">
+        <label class="slider">X step (px) <span id="stepVal">8</span>
+          <input type="range" id="xstep" min="1" max="15" value="8">
         </label>
         <label class="slider">Same-coloured curves <input type="number" id="nCurves" min="1" max="12" value="1" class="num"></label>
         <label class="slider">Bridge dashed gaps up to (px, 0 = off) <input type="number" id="bridge" min="0" max="200" value="0" class="num"></label>
         <button class="btn small primary" id="runAuto">Run auto extract</button>
-        <button class="btn small" id="runRegions" title="Run on every series that has a lasso region, one curve each">Run on all lasso regions</button>
+        <button class="btn small" id="runRegions" title="Run on every series that has a lasso region, one curve each">Run on all regions / bounds</button>
       </details>
     </section>
 
@@ -123,6 +141,7 @@
       <button class="tbtn tw" id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
       <button class="tbtn tw" id="redoBtn" title="Redo (Ctrl+Y)">Redo</button>
       <label class="chk" title="Draw a connected line through each series to check the fit"><input type="checkbox" id="showFit"> Overlay</label>
+      <select id="fitMode" class="tsel" title="Overlay line style"><option value="linear">Linear</option><option value="spline">Spline</option></select>
       <span id="cursorReadout" class="readout">&mdash;</span>
     </div>
     <div id="canvasWrap">

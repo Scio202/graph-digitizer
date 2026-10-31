@@ -18,6 +18,10 @@ const state = {
   drag: null,
   bg: undefined,        // cached background colour
   lasso: null,          // in-progress freeform selection [{px,py}]
+  box: null,            // in-progress box selection {a,b}
+  selMod: null,         // {add,neg} modifiers of the selection being drawn
+  bdrag: null,          // dragging a series-bound line / node
+  nextId: 0, ocr: null,
   axes: undefined       // cached axis detection (reset per image)
 };
 
@@ -33,7 +37,7 @@ const valMap = { X1:"valX1", X2:"valX2", Y1:"valY1", Y2:"valY2" };
 function loadImageFromSource(src){
   const img = new Image();
   img.onload = () => {
-    state.img = img; state.axes = undefined; state.bg = undefined;
+    state.img = img; state.axes = undefined; state.bg = undefined; state.ocr = null;
     offscreen.width = img.naturalWidth; offscreen.height = img.naturalHeight;
     offctx.drawImage(img, 0, 0);
     try { state.imgData = offctx.getImageData(0,0,img.naturalWidth,img.naturalHeight); }
@@ -107,22 +111,35 @@ function render(){
     ctx.setLineDash([]);
   }
 
-  const tracePoly = (poly, close) => {
-    ctx.beginPath(); poly.forEach((p,i) => i ? ctx.lineTo(p.px*s,p.py*s) : ctx.moveTo(p.px*s,p.py*s));
+  const tracePath = (pts, close, spline) => {
+    ctx.beginPath(); if(!pts.length) return;
+    ctx.moveTo(pts[0].px*s, pts[0].py*s);
+    if(spline && pts.length>2){
+      for(let i=0;i<pts.length-1;i++){
+        const p0=pts[i-1]||pts[i], p1=pts[i], p2=pts[i+1], p3=pts[i+2]||p2;
+        ctx.bezierCurveTo((p1.px+(p2.px-p0.px)/6)*s,(p1.py+(p2.py-p0.py)/6)*s,(p2.px-(p3.px-p1.px)/6)*s,(p2.py-(p3.py-p1.py)/6)*s,p2.px*s,p2.py*s);
+      }
+    } else for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].px*s, pts[i].py*s);
     if(close) ctx.closePath();
   };
+  const tracePoly = (poly, close) => tracePath(poly, close, false);
   state.series.forEach((ser,i) => {
-    if(!ser.sel) return;
-    tracePoly(ser.sel, true);
-    ctx.fillStyle = ser.color + "22"; ctx.fill();
-    ctx.setLineDash([6,4]); ctx.lineWidth = i===state.active ? 2 : 1; ctx.strokeStyle = ser.color; ctx.stroke();
-    ctx.setLineDash([]);
+    for(const r of ser.regs||[]){
+      const col = r.neg ? "#ff5c72" : ser.color;
+      tracePoly(r.poly, true); ctx.fillStyle = col + "22"; ctx.fill();
+      ctx.setLineDash([6,4]); ctx.lineWidth = i===state.active ? 2 : 1; ctx.strokeStyle = col; ctx.stroke();
+      ctx.setLineDash([]);
+    }
   });
-  if(state.lasso){ tracePoly(state.lasso, false); ctx.lineWidth = 1.5; ctx.strokeStyle = "#fff"; ctx.stroke(); }
+  const act = state.series[state.active];
+  if(act && act.bound) drawBound(act);
+  const preview = (poly, close) => { tracePoly(poly, close); ctx.lineWidth = 1.5; ctx.strokeStyle = state.selMod&&state.selMod.neg ? "#ff5c72" : "#fff"; ctx.stroke(); };
+  if(state.lasso) preview(state.lasso, false);
+  if(state.box){ const {a,b}=state.box; preview([a,{px:b.px,py:a.py},b,{px:a.px,py:b.py}], true); }
 
   if($("showFit").checked) state.series.forEach(ser => {
     if(ser.points.length<2) return;
-    tracePoly(ser.points, false);
+    tracePath(ser.points, false, $("fitMode").value==="spline");
     ctx.lineWidth=3.5; ctx.strokeStyle="rgba(0,0,0,.55)"; ctx.stroke();
     ctx.lineWidth=1.5; ctx.strokeStyle=ser.color; ctx.stroke();
   });
@@ -133,12 +150,28 @@ function render(){
     for(const pt of ser.points){
       ctx.beginPath(); ctx.arc(pt.px*s, pt.py*s, i===state.active?4:3, 0, Math.PI*2);
       ctx.fill(); ctx.stroke();
+      if(pt.q!==undefined && pt.q<0.25){   // low match probability: ring it for review
+        ctx.strokeStyle="#ff8f4d"; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(pt.px*s, pt.py*s, 7, 0, Math.PI*2); ctx.stroke();
+        ctx.strokeStyle = i===state.active ? "#fff" : "rgba(255,255,255,.4)"; ctx.lineWidth = i===state.active ? 1.5 : 1;
+      }
     }
   });
   if(state.selPt){
     ctx.strokeStyle="#ffe14d"; ctx.lineWidth=2;
     ctx.beginPath(); ctx.arc(state.selPt.px*s, state.selPt.py*s, 8, 0, Math.PI*2); ctx.stroke();
   }
+}
+// boundary of a "look only above/below this curve" region (kept side tinted)
+function drawBound(ser){
+  const b=ser.bound, s=state.scale, ns=boundNodes(b); if(ns.length<2) return;
+  const W=state.img.naturalWidth, edge=b.side==="above" ? 0 : state.img.naturalHeight;
+  ctx.beginPath(); ctx.moveTo(0,ns[0].py*s); ns.forEach(n=>ctx.lineTo(n.px*s,n.py*s));
+  ctx.lineTo(W*s,ns[ns.length-1].py*s); ctx.lineTo(W*s,edge*s); ctx.lineTo(0,edge*s); ctx.closePath();
+  ctx.fillStyle="rgba(247,179,43,.10)"; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(0,ns[0].py*s); ns.forEach(n=>ctx.lineTo(n.px*s,n.py*s)); ctx.lineTo(W*s,ns[ns.length-1].py*s);
+  ctx.setLineDash([8,4]); ctx.lineWidth=2; ctx.strokeStyle="#f7b32b"; ctx.stroke(); ctx.setLineDash([]);
+  if(state.mode==="bound"){ ctx.fillStyle="#f7b32b"; ctx.strokeStyle="#000"; ctx.lineWidth=1;
+    ns.forEach(n=>{ ctx.fillRect(n.px*s-4,n.py*s-4,8,8); ctx.strokeRect(n.px*s-4,n.py*s-4,8,8); }); }
 }
 function line(x1,y1,x2,y2){ ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
 function drawCross(x,y,color,label){
@@ -235,7 +268,16 @@ let panning=false, panStart=null, justDragged=false;
 canvas.addEventListener("mousedown", e => {
   if(!state.img) return;
   if(state.mode==="pan"){ panning=true; panStart={x:e.clientX,y:e.clientY,l:wrap.scrollLeft,t:wrap.scrollTop}; canvas.style.cursor="grabbing"; }
-  else if(state.mode==="lasso" && state.series[state.active]){ state.lasso=[canvasToNatural(e)]; }
+  else if(state.mode==="lasso" && state.series[state.active]){ state.lasso=[canvasToNatural(e)]; state.selMod=selModOf(e); }
+  else if(state.mode==="box" && state.series[state.active]){ const p=canvasToNatural(e); state.box={a:p,b:p}; state.selMod=selModOf(e); }
+  else if(state.mode==="bound"){
+    const b=(state.series[state.active]||{}).bound, p=canvasToNatural(e);
+    if(b){
+      const node=b.nodes.findIndex(n=>Math.hypot(n.px-p.px,n.py+b.off-p.py)*state.scale<=10);
+      if(node>=0) state.bdrag={kind:"node",i:node};
+      else if(distToPoly(boundNodes(b),p)*state.scale<=10) state.bdrag={kind:"line",y0:p.py,off0:b.off};
+    }
+  }
   else if(state.mode==="points" && state.series[state.active]){
     const ser=state.series[state.active], {px,py}=canvasToNatural(e), i=nearestPoint(ser,px,py);
     if(i>=0){ state.drag={ser,pt:ser.points[i],moved:false}; state.selPt=ser.points[i]; render(); }
@@ -243,7 +285,14 @@ canvas.addEventListener("mousedown", e => {
 });
 window.addEventListener("mousemove", e => {
   if(panning && panStart){ wrap.scrollLeft=panStart.l-(e.clientX-panStart.x); wrap.scrollTop=panStart.t-(e.clientY-panStart.y); }
-  if(state.drag){ const p=canvasToNatural(e); Object.assign(state.drag.pt,p); state.drag.moved=true; render(); }
+  if(state.drag){ const p=canvasToNatural(e); Object.assign(state.drag.pt,p); delete state.drag.pt.q; state.drag.moved=true; render(); }
+  if(state.box){ state.box.b=canvasToNatural(e); render(); }
+  if(state.bdrag){
+    const b=state.series[state.active].bound, p=canvasToNatural(e);
+    if(state.bdrag.kind==="node"){ const n=b.nodes[state.bdrag.i]; n.px=p.px; n.py=p.py-b.off; }
+    else { b.off=state.bdrag.off0+(p.py-state.bdrag.y0); $("boundOff").value=Math.round(b.off*10)/10; }
+    render();
+  }
   if(state.lasso){
     const p=canvasToNatural(e), q=state.lasso[state.lasso.length-1];
     if(Math.hypot(p.px-q.px,p.py-q.py)*state.scale>=3){ state.lasso.push(p); render(); }
@@ -256,10 +305,19 @@ window.addEventListener("mouseup", () => {
     justDragged=true; setTimeout(()=>justDragged=false,0);   // swallow the click that follows
     if(d.moved){ sortPoints(d.ser); afterEdit(); }
   }
+  const ser=state.series[state.active];
   if(state.lasso){
-    const ser=state.series[state.active];
-    if(state.lasso.length>=3 && ser) ser.sel=state.lasso;
+    if(state.lasso.length>=3 && ser) addRegion(ser,state.lasso,state.selMod);
     state.lasso=null; renderSeries(); render(); commit();
+  }
+  if(state.box){
+    const {a,b}=state.box; state.box=null;
+    if(ser && Math.abs(a.px-b.px)*state.scale>=4 && Math.abs(a.py-b.py)*state.scale>=4)
+      addRegion(ser,[a,{px:b.px,py:a.py},b,{px:a.px,py:b.py}],state.selMod);
+    renderSeries(); render(); commit();
+  }
+  if(state.bdrag){
+    const b=ser.bound; state.bdrag=null; b.nodes.sort((p,q)=>p.px-q.px); render(); commit();
   }
 });
 
@@ -304,6 +362,13 @@ canvas.addEventListener("click", e => {
   }
   else if(state.mode==="delete"){ const idx=nearestPoint(ser,px,py); if(idx>=0){ ser.points.splice(idx,1); afterEdit(); } }
 });
+const selModOf = e => ({ add:e.shiftKey, neg:$("selNeg").checked || e.altKey });
+// plain drag replaces the positive regions, Shift adds one, negative (checkbox / Alt) subtracts
+function addRegion(ser, poly, mod){
+  ser.regs = ser.regs || [];
+  if(!mod.neg && !mod.add) ser.regs = ser.regs.filter(r=>r.neg);
+  ser.regs.push({ poly, neg:!!mod.neg });
+}
 function nearestPoint(ser, px, py){
   let best=-1, bd=(12/state.scale)**2;
   ser.points.forEach((pt,i)=>{ const d=(pt.px-px)**2+(pt.py-py)**2; if(d<bd){ bd=d; best=i; } });
@@ -376,7 +441,7 @@ function sampleColor(px,py){
 // ============================================================ series
 function addSeries(){
   const color = PALETTE[state.series.length % PALETTE.length];
-  state.series.push({ name:"Series "+(state.series.length+1), color, points:[] });
+  state.series.push({ id:++state.nextId, name:"Series "+(state.series.length+1), color, points:[], regs:[], bound:null });
   state.active = state.series.length-1;
   renderSeries(); refreshData(); commit();
 }
@@ -387,7 +452,7 @@ function renderSeries(){
     div.className="series-item"+(i===state.active?" active":"");
     div.innerHTML=`<input type="color" value="${ser.color}">
       <input type="text" value="${ser.name.replace(/"/g,'&quot;')}">
-      ${ser.sel?'<span class="sel" title="Has a lasso region">&#11036;</span>':''}
+      ${(ser.regs&&ser.regs.length)||ser.bound?'<span class="sel" title="Has a search region / bound">&#11036;</span>':''}
       <span class="count">${ser.points.length}</span>
       <button class="del" title="Delete series">&times;</button>`;
     div.querySelector('input[type=color]').oninput = e=>{ ser.color=e.target.value; render(); };
@@ -395,12 +460,20 @@ function renderSeries(){
     div.querySelector('input[type=color]').onchange = commit;
     div.querySelector('input[type=text]').onchange  = commit;
     div.querySelector('.del').onclick = e=>{ e.stopPropagation(); deleteSeries(i); };
-    div.onclick = ()=>{ state.active=i; renderSeries(); render(); };
+    // switching the active series must not rebuild the list, or a text box being edited loses focus
+    div.onclick = ()=>{
+      if(state.active===i) return;
+      state.active=i;
+      list.querySelectorAll(".series-item").forEach((el,k)=>el.classList.toggle("active",k===i));
+      syncBoundUI(); render();
+    };
     list.appendChild(div);
   });
+  syncBoundUI();
 }
 function deleteSeries(i){
-  state.series.splice(i,1);
+  const gone=state.series.splice(i,1)[0];
+  state.series.forEach(s=>{ if(s.bound&&s.bound.ref===gone.id) s.bound=null; });
   if(state.active>=state.series.length) state.active=state.series.length-1;
   renderSeries(); afterEdit();
 }
@@ -420,27 +493,64 @@ function regionBox(){
   if(c.Y1&&c.Y2){ y0=Math.max(0,Math.floor(Math.min(c.Y1.py,c.Y2.py))); y1=Math.min(H-1,Math.ceil(Math.max(c.Y1.py,c.Y2.py))); }
   return {x0,x1,y0,y1};
 }
-// rasterise a freeform selection into a W*H 0/1 mask
-function buildMask(poly){
+// rasterise polygons (their union) into a W*H 0/1 mask
+function buildMask(polys){
   const W=state.imgData.width, H=state.imgData.height;
   const c=document.createElement("canvas"); c.width=W; c.height=H;
   const g=c.getContext("2d",{willReadFrequently:true});
-  g.beginPath(); poly.forEach((p,i)=> i ? g.lineTo(p.px,p.py) : g.moveTo(p.px,p.py)); g.closePath(); g.fill();
+  for(const poly of polys){ g.beginPath(); poly.forEach((p,i)=> i ? g.lineTo(p.px,p.py) : g.moveTo(p.px,p.py)); g.closePath(); g.fill(); }
   const a=g.getImageData(0,0,W,H).data, m=new Uint8Array(W*H);
   for(let i=0;i<m.length;i++) m[i]=a[i*4+3]>127?1:0;
   return m;
 }
+// ---- "only look above / below another digitized curve" ----
+function boundNodes(b){ return b.nodes.map(n=>({px:n.px,py:n.py+b.off})).sort((a,c)=>a.px-c.px); }
+function segDist(p,a,b){
+  const dx=b.px-a.px, dy=b.py-a.py, L=dx*dx+dy*dy; let t=L?((p.px-a.px)*dx+(p.py-a.py)*dy)/L:0;
+  t=Math.max(0,Math.min(1,t)); return Math.hypot(p.px-a.px-t*dx, p.py-a.py-t*dy);
+}
+function distToPoly(ns,p){ let m=Infinity; for(let i=0;i<ns.length-1;i++) m=Math.min(m,segDist(p,ns[i],ns[i+1])); return m; }
+function simplifyPts(pts,eps){   // Douglas-Peucker; pts sorted by x
+  const out=pts.map(p=>({px:p.px,py:p.py}));
+  if(out.length<3) return out;
+  const keep=new Uint8Array(out.length); keep[0]=keep[out.length-1]=1; const st=[[0,out.length-1]];
+  while(st.length){
+    const [a,b]=st.pop(); let md=0, mi=-1;
+    for(let i=a+1;i<b;i++){ const d=segDist(out[i],out[a],out[b]); if(d>md){ md=d; mi=i; } }
+    if(md>eps && mi>0){ keep[mi]=1; st.push([a,mi],[mi,b]); }
+  }
+  return out.filter((_,i)=>keep[i]);
+}
+function applyBound(mask,b,W,H){
+  const ns=boundNodes(b); if(ns.length<2) return;
+  let k=0;
+  for(let x=0;x<W;x++){
+    while(k<ns.length-2 && x>ns[k+1].px) k++;
+    const a=ns[k], c=ns[k+1]; const t=Math.max(0,Math.min(1,(x-a.px)/(c.px-a.px||1)));
+    const yb=a.py+t*(c.py-a.py);
+    for(let y=0;y<H;y++) if(b.side==="above" ? !(y<yb) : !(y>yb)) mask[y*W+x]=0;
+  }
+}
 
-// search area for ser: its lasso (bbox + mask) if set, else the calibrated box inset from the axes
+// search area for ser: union of its positive regions (else the calibrated box inset from the axes),
+// minus its negative regions, limited to one side of its bound curve
 function regionOf(ser){
   const W=state.imgData.width, H=state.imgData.height;
-  if(ser.sel){
-    const xs=ser.sel.map(p=>p.px), ys=ser.sel.map(p=>p.py);
-    return { x0:Math.max(0,Math.floor(Math.min(...xs))), x1:Math.min(W-1,Math.ceil(Math.max(...xs))),
-             y0:Math.max(0,Math.floor(Math.min(...ys))), y1:Math.min(H-1,Math.ceil(Math.max(...ys))), mask:buildMask(ser.sel) };
+  const pos=(ser.regs||[]).filter(r=>!r.neg), neg=(ser.regs||[]).filter(r=>r.neg);
+  let box;
+  if(pos.length){
+    let a=Infinity,b=-Infinity,c=Infinity,d=-Infinity;
+    for(const r of pos) for(const p of r.poly){ a=Math.min(a,p.px); b=Math.max(b,p.px); c=Math.min(c,p.py); d=Math.max(d,p.py); }
+    box={ x0:Math.max(0,Math.floor(a)), x1:Math.min(W-1,Math.ceil(b)), y0:Math.max(0,Math.floor(c)), y1:Math.min(H-1,Math.ceil(d)) };
+  } else {
+    const r=regionBox(), inset=3;
+    box={ x0:Math.max(0,r.x0+inset), x1:Math.min(W-1,r.x1-inset), y0:Math.max(0,r.y0+inset), y1:Math.min(H-1,r.y1-inset) };
   }
-  const r=regionBox(), inset=3;
-  return { x0:Math.max(0,r.x0+inset), x1:Math.min(W-1,r.x1-inset), y0:Math.max(0,r.y0+inset), y1:Math.min(H-1,r.y1-inset), mask:null };
+  if(!pos.length && !neg.length && !ser.bound) return { ...box, mask:null };
+  const mask = pos.length ? buildMask(pos.map(r=>r.poly)) : new Uint8Array(W*H).fill(1);
+  if(neg.length){ const nm=buildMask(neg.map(r=>r.poly)); for(let i=0;i<mask.length;i++) if(nm[i]) mask[i]=0; }
+  if(ser.bound) applyBound(mask,ser.bound,W,H);
+  return { ...box, mask };
 }
 
 // ---- marker detection (circles / triangles / squares, filled or outline) ----
@@ -616,48 +726,108 @@ function traceCurves(ser, n){
   cols.forEach((col,i)=>{ const sc=score(col); if(sc>bs){ bs=sc; si=i; } });
   const seeds=top(cols[si]).sort((a,b)=>a.c-b.c).map(cl=>({x:cols[si].x,y:cl.c,n:cl.n}));
 
-  // 3. follow each curve outward from the seed; each column's clusters are matched to curves
-  //    greedily by (thickness - distance from the curve's extrapolated position)
-  const maxJump=Math.max(10,(y1-y0)*0.25), THICK_GAIN=6;
+  // 3. probabilistic tracking. Each curve carries a Kalman state (position + slope, with growing uncertainty).
+  //    For every column, each (curve, cluster) pair gets a likelihood = how plausible that cluster is as the
+  //    curve's next position (distance in sigmas, plus thickness consistency). Clusters are then assigned to
+  //    curves jointly (Hungarian, one cluster per curve and vice versa), so two close curves can't both claim
+  //    the same ink and a curve prefers the globally most probable explanation rather than the nearest blob.
+  const QA=0.0009, GATE=16, MISS=4, BIG=1e4;
   const follow=order=>{
-    const T=seeds.map(s=>({x:s.x,y:s.y,vy:0,th:s.n,pts:[]}));
+    const T=seeds.map(s=>({x:s.x,y:s.y,v:0,pyy:2,pyv:0,pvv:0.25,th:s.n,pts:[]}));
     for(const col of order){
-      const pred=T.map(t=>t.y+t.vy*(col.x-t.x));
+      const C=col.clusters;
+      const P=T.map(t=>{          // predict every curve to this column
+        const dx=col.x-t.x, a=Math.abs(dx);
+        return { y:t.y+t.v*dx,
+                 yy:t.pyy+2*dx*t.pyv+dx*dx*t.pvv+QA*a*a*a/3,
+                 yv:t.pyv+dx*t.pvv+QA*dx*a/2,
+                 vv:t.pvv+QA*a };
+      });
       // curves crossing: a cluster much thicker than the curves, spanning 2+ predictions, is a merge.
-      // Those curves coast on their extrapolated path instead of snapping to the merged centre.
+      // Those curves coast on their prediction instead of snapping to the merged centre.
       const coast=new Set(), dead=new Set();
-      col.clusters.forEach((cl,ci)=>{
-        const in_=T.map((t,ti)=>ti).filter(ti=>Math.abs(pred[ti]-cl.c)<=cl.n/2+2);
+      C.forEach((cl,ci)=>{
+        const in_=T.map((t,ti)=>ti).filter(ti=>Math.abs(P[ti].y-cl.c)<=cl.n/2+2);
         if(in_.length>=2 && cl.n>1.3*Math.max(...in_.map(ti=>T[ti].th))){ in_.forEach(ti=>coast.add(ti)); dead.add(ci); }
       });
-      const pairs=[];
-      T.forEach((t,ti)=>{
-        if(coast.has(ti)) return;
-        col.clusters.forEach((cl,ci)=>{ if(dead.has(ci)) return; const d=Math.abs(cl.c-pred[ti]); if(d<=maxJump) pairs.push({ti,ci,s:THICK_GAIN*cl.n-d}); });
-      });
-      pairs.sort((a,b)=>b.s-a.s);
-      const ut=new Set(), uc=new Set();
-      for(const p of pairs){
-        if(ut.has(p.ti)||uc.has(p.ci)) continue;
-        ut.add(p.ti); uc.add(p.ci);
-        const t=T[p.ti], cl=col.clusters[p.ci];
-        t.vy=0.5*t.vy+0.5*(cl.c-t.y)/(col.x-t.x); t.th=0.8*t.th+0.2*cl.n;
-        t.x=col.x; t.y=cl.c; t.pts.push({px:col.x,py:cl.c});
+      const rows=T.map((t,ti)=>ti).filter(ti=>!coast.has(ti));
+      const live=C.map((cl,ci)=>ci).filter(ci=>!dead.has(ci));
+      const match=new Map();
+      if(rows.length){
+        const cost=rows.map(ti=>[
+          ...live.map(ci=>{
+            const cl=C[ci], R=0.5+cl.n*cl.n/48, S=P[ti].yy+R, v=cl.c-P[ti].y, d2=v*v/S;
+            if(d2>GATE) return BIG;
+            const lt=Math.log(cl.n/T[ti].th)/0.45;
+            return 0.5*(d2+Math.log(S)+lt*lt);
+          }),
+          ...rows.map(()=>MISS)
+        ]);
+        const as=hungarian(cost,rows.length,live.length+rows.length);
+        rows.forEach((ti,r)=>{ if(as[r]<live.length && cost[r][as[r]]<BIG) match.set(ti,live[as[r]]); });
       }
-      coast.forEach(ti=>{ const t=T[ti]; t.x=col.x; t.y=pred[ti]; t.pts.push({px:col.x,py:pred[ti]}); });
+      T.forEach((t,ti)=>{
+        const p=P[ti], ci=match.get(ti);
+        if(ci!==undefined){
+          const cl=C[ci], R=0.5+cl.n*cl.n/48, S=p.yy+R, inn=cl.c-p.y, Ky=p.yy/S, Kv=p.yv/S;
+          t.y=p.y+Ky*inn; t.v=t.v+Kv*inn;
+          t.pyy=p.yy-p.yy*p.yy/S; t.pyv=p.yv-p.yy*p.yv/S; t.pvv=p.vv-p.yv*p.yv/S;
+          t.th=0.8*t.th+0.2*cl.n; t.x=col.x;
+          t.pts.push({px:col.x,py:cl.c,q:Math.exp(-0.5*inn*inn/S)});
+        } else {                     // no measurement: advance on the prediction (uncertainty keeps growing)
+          t.y=p.y; t.pyy=p.yy; t.pyv=p.yv; t.pvv=p.vv; t.x=col.x;
+          if(coast.has(ti)) t.pts.push({px:col.x,py:p.y,q:0,coast:true});
+        }
+      });
     }
     return T.map(t=>t.pts);
   };
   const right=follow(cols.slice(si+1)), left=follow(cols.slice(0,si).reverse());
+  const tracks=seeds.map((s,k)=>[...left[k].reverse(),{px:s.x,py:s.y,q:1},...right[k]]);
+
+  // 4. never put two curves in the same spot: where two tracks have a point in the same column closer than a
+  //    curve thickness, keep the real measurement (over a coasted one), else the more probable, and drop the other
+  const minSep=Math.max(2,0.6*Math.min(...seeds.map(s=>s.n)));
+  const byX=new Map();
+  tracks.forEach(pts=>pts.forEach(p=>{ const a=byX.get(p.px)||[]; a.push(p); byX.set(p.px,a); }));
+  const drop=new Set();
+  byX.forEach(list=>{
+    for(let a=0;a<list.length;a++) for(let b=a+1;b<list.length;b++){
+      const A=list[a], B=list[b];
+      if(drop.has(A)||drop.has(B)||Math.abs(A.py-B.py)>=minSep) continue;
+      drop.add(A.coast&&!B.coast ? A : B.coast&&!A.coast ? B : (A.q>=B.q ? B : A));
+    }
+  });
   const bridge=+$("bridge").value;
   const fill=pts=>{ if(!bridge) return pts; const o=[pts[0]];
     for(let i=1;i<pts.length;i++){ const a=pts[i-1], b=pts[i], dx=b.px-a.px;
       if(dx>step*1.5 && dx<=bridge) for(let x=a.px+step;x<b.px;x+=step) o.push({px:x,py:a.py+(b.py-a.py)*(x-a.px)/dx});
       o.push(b); }
     return o; };
-  const out=seeds.map((s,k)=>[...left[k].reverse(),{px:s.x,py:s.y},...right[k]]).filter(p=>p.length>=2).map(fill);
+  const out=tracks.map(pts=>pts.filter(p=>!drop.has(p))).filter(p=>p.length>=2).map(fill);
   if(!out.length){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
   return out;
+}
+// minimum-cost assignment of n rows to m>=n columns (Hungarian / Jonker-Volgenant); returns column per row
+function hungarian(cost,n,m){
+  const u=new Float64Array(n+1), v=new Float64Array(m+1), p=new Int32Array(m+1), way=new Int32Array(m+1);
+  for(let i=1;i<=n;i++){
+    p[0]=i; let j0=0; const minv=new Float64Array(m+1).fill(Infinity), used=new Uint8Array(m+1);
+    do{
+      used[j0]=1; const i0=p[j0]; let delta=Infinity, j1=0;
+      for(let jj=1;jj<=m;jj++) if(!used[jj]){
+        const cur=cost[i0-1][jj-1]-u[i0]-v[jj];
+        if(cur<minv[jj]){ minv[jj]=cur; way[jj]=j0; }
+        if(minv[jj]<delta){ delta=minv[jj]; j1=jj; }
+      }
+      for(let jj=0;jj<=m;jj++){ if(used[jj]){ u[p[jj]]+=delta; v[jj]-=delta; } else minv[jj]-=delta; }
+      j0=j1;
+    } while(p[j0]!==0);
+    do{ const j1=way[j0]; p[j0]=p[j1]; j0=j1; } while(j0);
+  }
+  const ans=new Array(n);
+  for(let jj=1;jj<=m;jj++) if(p[jj]) ans[p[jj]-1]=jj-1;
+  return ans;
 }
 
 // Trace into series `si`; extra curves go into the following series (created if missing).
@@ -688,11 +858,33 @@ $("runAuto").onclick = ()=>{
 };
 $("runRegions").onclick = ()=>{
   if(!autoPrecheck()) return;
-  const idx=state.series.map((s,i)=>s.sel?i:-1).filter(i=>i>=0);
-  if(!idx.length){ alert("Draw a region (Lasso) for at least one series first."); return; }
+  const idx=state.series.map((s,i)=>(s.regs&&s.regs.some(r=>!r.neg))||s.bound?i:-1).filter(i=>i>=0);
+  if(!idx.length){ alert("Give at least one series a region (Lasso / Box) or a bound first."); return; }
   idx.forEach(i=>extractInto(i,1));
 };
-$("clearRegion").onclick = ()=>{ const s=state.series[state.active]; if(s){ s.sel=null; renderSeries(); render(); commit(); } };
+$("clearRegion").onclick = ()=>{ const s=state.series[state.active]; if(s){ s.regs=[]; renderSeries(); render(); commit(); } };
+
+// ---- bound UI ----
+function syncBoundUI(){
+  const sel=$("boundRef"), cur=sel.value, act=state.series[state.active], b=act&&act.bound;
+  sel.innerHTML=state.series.filter(s=>s!==act&&s.points.length>=2).map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join("")
+    || '<option value="">(digitize another series first)</option>';
+  if(b){ sel.value=b.ref; $("boundSide").value=b.side; $("boundOff").value=Math.round(b.off*10)/10; }
+  else if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+  $("boundInfo").textContent = b ? `Bound to "${(state.series.find(s=>s.id===b.ref)||{name:"?"}).name}", ${b.side}, ${b.nodes.length} nodes. Use the Bound tool (G) to drag the line or its nodes.` : "No bound on this series.";
+}
+$("boundApply").onclick = ()=>{
+  const act=state.series[state.active], ref=state.series.find(s=>String(s.id)===$("boundRef").value);
+  if(!act||!ref||ref.points.length<2){ alert("Pick another series that already has points."); return; }
+  const pts=ref.points.slice().sort((a,b)=>a.px-b.px);
+  let nodes=simplifyPts(pts,1.5), eps=1.5; while(nodes.length>60){ eps*=1.5; nodes=simplifyPts(pts,eps); }
+  act.bound={ ref:ref.id, side:$("boundSide").value, off:+$("boundOff").value||0, nodes };
+  setMode("bound"); renderSeries(); render(); commit();
+};
+$("boundClear").onclick = ()=>{ const a=state.series[state.active]; if(a){ a.bound=null; renderSeries(); render(); commit(); } };
+$("boundSide").onchange = ()=>{ const b=(state.series[state.active]||{}).bound; if(b){ b.side=$("boundSide").value; render(); commit(); } };
+$("boundOff").oninput = ()=>{ const b=(state.series[state.active]||{}).bound; if(b){ b.off=+$("boundOff").value||0; render(); } };
+$("boundOff").onchange = commit;
 
 // ============================================================ data table + CSV
 function fmt(v){
@@ -828,14 +1020,16 @@ function autoCal(t){
   if(!["BL","TR"].includes(t) && ((t[0]==="X"&&!A.xTicks)||(t[0]==="Y"&&!A.yTicks)))
     alert(`No tick marks found on the ${note}; used the axis end instead. Nudge with Set if needed.`);
   updateCalibStatus(); render();
-  const f=$(valMap[t==="BL"?"X1":t==="TR"?"X2":t]); if(f) f.focus();
+  const keys=t==="BL"?["X1","Y1"]:t==="TR"?["X2","Y2"]:[t];
+  if($("ocrAuto").checked) ocrFill(keys);
+  else { const f=$(valMap[keys[0]]); if(f) f.focus(); }
 }
 document.querySelectorAll(".abtn").forEach(b => b.onclick = () => autoCal(b.dataset.auto));
 
 // ============================================================ undo / redo / hotkeys
 const hist={stack:[],i:-1};
 function commit(){
-  const j=JSON.stringify({a:state.active,s:state.series.map(s=>({name:s.name,color:s.color,points:s.points,sel:s.sel||null}))});
+  const j=JSON.stringify({a:state.active,s:state.series.map(s=>({id:s.id,name:s.name,color:s.color,points:s.points,regs:s.regs||[],bound:s.bound||null}))});
   if(hist.stack[hist.i]===j) return;
   hist.stack.length=hist.i+1; hist.stack.push(j);
   if(hist.stack.length>100) hist.stack.shift();
@@ -849,7 +1043,7 @@ function restore(){
 function undo(){ if(hist.i>0){ hist.i--; restore(); } }
 function redo(){ if(hist.i<hist.stack.length-1){ hist.i++; restore(); } }
 $("undoBtn").onclick=undo; $("redoBtn").onclick=redo;
-$("showFit").onchange=render;
+$("showFit").onchange=render; $("fitMode").onchange=render;
 
 window.addEventListener("keydown", e=>{
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -858,7 +1052,7 @@ window.addEventListener("keydown", e=>{
   if(mod&&k==="y"){ e.preventDefault(); redo(); return; }
   if(mod||e.altKey) return;
   if(/^[1-9]$/.test(k)){ if(state.series[k-1]){ state.active=k-1; renderSeries(); render(); } return; }
-  const modes={a:"points",d:"delete",l:"lasso",t:"trace",h:"pan"};
+  const modes={a:"points",d:"delete",l:"lasso",b:"box",g:"bound",t:"trace",h:"pan"};
   if(modes[k]){ setMode(modes[k]); return; }
   if(k==="escape"){ state.selPt=null; render(); return; }
   const ser=state.series.find(s=>s.points.includes(state.selPt));
@@ -867,6 +1061,93 @@ window.addEventListener("keydown", e=>{
   if(mv){ e.preventDefault(); state.selPt.px+=mv[0]; state.selPt.py+=mv[1]; sortPoints(ser); afterEdit(); }
   else if(k==="delete"||k==="backspace"){ e.preventDefault(); ser.points.splice(ser.points.indexOf(state.selPt),1); state.selPt=null; afterEdit(); }
 });
+
+// ============================================================ OCR for reference values (tesseract.js, loaded on demand)
+let tessPromise=null;
+function loadTesseract(){
+  if(window.Tesseract) return Promise.resolve();
+  return tessPromise || (tessPromise=new Promise((res,rej)=>{
+    const s=document.createElement("script");
+    s.src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+    s.onload=res; s.onerror=()=>{ tessPromise=null; rej(new Error("Couldn't load the OCR library (are you offline?).")); };
+    document.head.appendChild(s);
+  }));
+}
+function parseNum(t){
+  const c=t.replace(/,/g,".").replace(/^[^\d.+-]+|[^\d]+$/g,"");
+  return /^[+-]?(\d+\.?\d*|\.\d+)$/.test(c) ? parseFloat(c) : null;
+}
+let tessWorker=null;
+async function getWorker(psm){
+  await loadTesseract();
+  if(!tessWorker){
+    tessWorker=await Tesseract.createWorker("eng");
+    await tessWorker.setParameters({ tessedit_char_whitelist:"0123456789.-+" });
+  }
+  await tessWorker.setParameters({ tessedit_pageseg_mode:Tesseract.PSM[psm] });
+  return tessWorker;
+}
+// numbers on the image with their centres, read once per image
+async function ocrNumbers(){
+  if(state.ocr) return state.ocr;
+  const f=state.img.naturalWidth<1400?2:1;     // small images read better upscaled
+  const cv=document.createElement("canvas"); cv.width=state.img.naturalWidth*f; cv.height=state.img.naturalHeight*f;
+  cv.getContext("2d").drawImage(state.img,0,0,cv.width,cv.height);
+  const {data}=await (await getWorker("SPARSE_TEXT")).recognize(cv);
+  return state.ocr=(data.words||[]).map(w=>({ v:parseNum(w.text), text:w.text,
+      cx:(w.bbox.x0+w.bbox.x1)/2/f, cy:(w.bbox.y0+w.bbox.y1)/2/f, h:(w.bbox.y1-w.bbox.y0)/f }))
+    .filter(w=>w.v!==null);
+}
+// X labels sit under their tick: nearest horizontally, ties go to the right. Y labels sit beside theirs:
+// nearest vertically, ties go to the one above. A small term for the other axis keeps it on the same row/column.
+// Returns {w, off} (off = distance along the matching axis) or null.
+function pickLabel(k,words,h){
+  const pt=state.cal[k]; if(!pt||!words.length) return null;
+  const X=k[0]==="X", pen=0.75*h;
+  // labels are below the x axis / left of the y axis; ignore everything else when something qualifies
+  const side=words.filter(w=> X ? w.cy>pt.py : w.cx<pt.px);
+  const pool=side.length?side:words;
+  let best=null, bs=Infinity;
+  for(const w of pool){
+    const s = X ? Math.abs(w.cx-pt.px)+(w.cx<pt.px?pen:0)+0.05*Math.abs(w.cy-pt.py)
+                : Math.abs(w.cy-pt.py)+(w.cy>pt.py?pen:0)+0.05*Math.abs(w.cx-pt.px);
+    if(s<bs){ bs=s; best=w; }
+  }
+  return best && { w:best, off: X ? Math.abs(best.cx-pt.px) : Math.abs(best.cy-pt.py) };
+}
+// the full-page pass drops lone digits like "0"; read the expected label spot on its own, enlarged
+async function cropOcr(k,h){
+  const pt=state.cal[k], X=k[0]==="X";
+  let x0,x1,y0,y1;
+  if(X){ x0=pt.px-3*h; x1=pt.px+3*h; y0=pt.py+0.6*h; y1=pt.py+3.5*h; }
+  else { x0=pt.px-8*h; x1=pt.px-0.7*h; y0=pt.py-1.2*h; y1=pt.py+1.2*h; }
+  x0=Math.max(0,x0); y0=Math.max(0,y0); x1=Math.min(state.img.naturalWidth,x1); y1=Math.min(state.img.naturalHeight,y1);
+  if(x1-x0<4||y1-y0<4) return null;
+  const f=3, pad=24, cv=document.createElement("canvas"); cv.width=(x1-x0)*f+2*pad; cv.height=(y1-y0)*f+2*pad;
+  const g=cv.getContext("2d"); g.fillStyle="#fff"; g.fillRect(0,0,cv.width,cv.height);
+  g.drawImage(state.img,x0,y0,x1-x0,y1-y0,pad,pad,(x1-x0)*f,(y1-y0)*f);
+  const {data}=await (await getWorker("SINGLE_WORD")).recognize(cv);
+  return parseNum(data.text.trim());
+}
+async function ocrFill(keys){
+  if(!state.img){ alert("Load an image first."); return; }
+  const st=$("ocrStatus"); st.textContent="Reading numbers… (first use downloads the OCR model)";
+  try{
+    const words=await ocrNumbers(), got=[];
+    const hs=words.map(w=>w.h).sort((a,b)=>a-b), h=hs.length?hs[hs.length>>1]:20;
+    for(const k of keys){
+      const hit=pickLabel(k,words,h);
+      let v = hit && hit.off<=1.5*h ? hit.w.v : null;
+      if(v===null) v=await cropOcr(k,h);
+      if(v===null) v = hit ? hit.w.v : null;
+      if(v===null) continue;
+      state.cal[k].val=v; $(valMap[k]).value=v; got.push(`${k}=${v}`);
+    }
+    st.textContent=got.length?`OCR: ${got.join(", ")} — check them.`:"OCR found no numbers near the placed points.";
+    updateCalibStatus(); render();
+  } catch(err){ st.textContent=""; alert(err.message||err); }
+}
+$("ocrBtn").onclick=()=>ocrFill(["X1","X2","Y1","Y2"].filter(k=>state.cal[k]));
 
 // ============================================================ init
 addSeries(); setMode("points"); updateCalibStatus();
