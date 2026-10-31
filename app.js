@@ -19,6 +19,8 @@ const state = {
   bg: undefined,        // cached background colour
   lasso: null,          // in-progress freeform selection [{px,py}]
   box: null,            // in-progress box selection {a,b}
+  brush: null,          // in-progress brush stroke {path,r,kind:'region'|'pts'}
+  cursor: null,         // mouse position (natural px), for the brush ring
   selMod: null,         // {add,neg} modifiers of the selection being drawn
   hint: null,           // Trace click: curves must start within 10 px of it
   bdrag: null,          // dragging a series-bound line / node
@@ -127,16 +129,24 @@ function render(){
   state.series.forEach((ser,i) => {
     for(const r of ser.regs||[]){
       const col = r.neg ? "#ff5c72" : ser.color;
-      tracePoly(r.poly, true); ctx.fillStyle = col + "22"; ctx.fill();
+      if(r.path){ paintBrush(r.path, r.r*s, col+"44"); continue; }
+      tracePoly(r.poly, true); ctx.fillStyle = col + "33"; ctx.fill();
       ctx.setLineDash([6,4]); ctx.lineWidth = i===state.active ? 2 : 1; ctx.strokeStyle = col; ctx.stroke();
       ctx.setLineDash([]);
     }
   });
   const act = state.series[state.active];
   if(act && act.bound) drawBound(act);
-  const preview = (poly, close) => { tracePoly(poly, close); ctx.lineWidth = 1.5; ctx.strokeStyle = state.selMod&&state.selMod.neg ? "#ff5c72" : "#fff"; ctx.stroke(); };
-  if(state.lasso) preview(state.lasso, false);
+  // live selection shapes are tinted as they are drawn: series colour for regions, yellow for point selection, red = subtract
+  const pcol = () => state.selMod&&state.selMod.neg ? "#ff5c72" : state.mode==="select" ? "#ffe14d" : ((state.series[state.active]||{}).color||"#fff");
+  const preview = (poly, close) => { tracePoly(poly, close); ctx.fillStyle = pcol()+"33"; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = pcol(); ctx.stroke(); };
+  if(state.lasso) preview(state.lasso, true);
   if(state.box){ const {a,b}=state.box; preview([a,{px:b.px,py:a.py},b,{px:a.px,py:b.py}], true); }
+  if(state.brush) paintBrush(state.brush.path, state.brush.r*s, pcol()+"55");
+  if(brushActive() && state.cursor && !state.brush){
+    ctx.strokeStyle=pcol(); ctx.lineWidth=1.5; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.arc(state.cursor.px*s, state.cursor.py*s, +$("brushR").value, 0, Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
+  }
 
   if($("showFit").checked) state.series.forEach(ser => {
     if(ser.points.length<2) return;
@@ -164,6 +174,18 @@ function render(){
   $("selCount").textContent = state.selPts.size ? state.selPts.size+" selected" : "";
 }
 // boundary of a "look only above/below this curve" region (kept side tinted)
+// ---- brush: a stroke of a given radius (natural px) painted as one translucent shape
+const brushActive = () => state.mode==="brush" || (state.mode==="select" && $("pselShape").value==="brush");
+const brushR = () => +$("brushR").value / state.scale;      // slider is in screen px; stored radius is in image px
+function paintBrush(path, rScreen, col){
+  if(!path.length) return;
+  const s=state.scale;
+  ctx.save(); ctx.lineCap="round"; ctx.lineJoin="round"; ctx.lineWidth=2*rScreen; ctx.strokeStyle=col;
+  ctx.beginPath(); ctx.moveTo(path[0].px*s,path[0].py*s);
+  if(path.length===1) ctx.lineTo(path[0].px*s+0.01,path[0].py*s);
+  for(let i=1;i<path.length;i++) ctx.lineTo(path[i].px*s,path[i].py*s);
+  ctx.stroke(); ctx.restore();
+}
 function drawBound(ser){
   const b=ser.bound, s=state.scale, ns=boundNodes(b); if(ns.length<2) return;
   const W=state.img.naturalWidth, edge=b.side==="above" ? 0 : state.img.naturalHeight;
@@ -272,6 +294,7 @@ canvas.addEventListener("mousedown", e => {
   if(state.mode==="pan"){ panning=true; panStart={x:e.clientX,y:e.clientY,l:wrap.scrollLeft,t:wrap.scrollTop}; canvas.style.cursor="grabbing"; }
   else if(state.mode==="lasso" && state.series[state.active]){ state.lasso=[canvasToNatural(e)]; state.selMod=selModOf(e); }
   else if(state.mode==="box" && state.series[state.active]){ const p=canvasToNatural(e); state.box={a:p,b:p}; state.selMod=selModOf(e); }
+  else if(state.mode==="brush" && state.series[state.active]){ const p=canvasToNatural(e); state.selMod=selModOf(e); state.brush={path:[p],r:brushR(),kind:"region"}; render(); }
   else if(state.mode==="bound"){
     const b=(state.series[state.active]||{}).bound, p=canvasToNatural(e);
     if(b){
@@ -287,7 +310,16 @@ canvas.addEventListener("mousedown", e => {
   else if(state.mode==="select" && state.series[state.active]){
     const ser=state.series[state.active], p=canvasToNatural(e), i=nearestPoint(ser,p.px,p.py);
     if(i>=0 && state.selPts.has(ser.points[i])) startDrag(ser.points[i],p);          // drag the selection
-    else { state.selMod=selModOf(e); if($("pselShape").value==="lasso") state.lasso=[p]; else state.box={a:p,b:p}; }
+    else {
+      state.selMod=selModOf(e); const shape=$("pselShape").value;
+      if(shape==="lasso") state.lasso=[p];
+      else if(shape==="brush"){
+        state.brush={path:[p],r:brushR(),kind:"pts"};
+        if(!state.selMod.add&&!state.selMod.neg) state.selPts=new Set();
+        brushSelect(ser,p,p,state.brush.r,state.selMod); render();
+      }
+      else state.box={a:p,b:p};
+    }
   }
 });
 // press on a point: it (or the whole selection, if it is part of one) follows the mouse
@@ -303,6 +335,14 @@ window.addEventListener("mousemove", e => {
     if(d.moved || Math.hypot(dx,dy)*state.scale>=2){ d.moved=true; d.orig.forEach(o=>{ o.q.px=o.x+dx; o.q.py=o.y+dy; delete o.q.q; }); render(); }
   }
   if(state.box){ state.box.b=canvasToNatural(e); render(); }
+  if(state.brush){
+    const p=canvasToNatural(e), b=state.brush, q=b.path[b.path.length-1];
+    if(Math.hypot(p.px-q.px,p.py-q.py)*state.scale>=2){
+      b.path.push(p);
+      if(b.kind==="pts") brushSelect(state.series[state.active],q,p,b.r,state.selMod);
+      render();
+    }
+  }
   if(state.bdrag){
     const b=state.series[state.active].bound, p=canvasToNatural(e);
     if(state.bdrag.kind==="node"){ const n=b.nodes[state.bdrag.i]; n.px=p.px; n.py=p.py-b.off; }
@@ -334,6 +374,11 @@ window.addEventListener("mouseup", () => {
     if(state.mode==="select"){ if(ser) selectPts(ser,big?poly:null,state.selMod); }
     else { if(ser && big) addRegion(ser,poly,state.selMod); renderSeries(); render(); commit(); }
   }
+  if(state.brush){
+    const b=state.brush; state.brush=null;
+    if(b.kind==="region" && ser){ addRegion(ser,{path:b.path,r:b.r},state.selMod); renderSeries(); render(); commit(); }
+    else render();
+  }
   if(state.bdrag){
     const b=ser.bound; state.bdrag=null; b.nodes.sort((p,q)=>p.px-q.px); render(); commit();
   }
@@ -343,11 +388,12 @@ canvas.addEventListener("mousemove", e => {
   if(!state.img) return;
   const {px,py} = canvasToNatural(e);
   updateLoupe(e, px, py);
+  state.cursor={px,py}; if(brushActive()) render();
   const ro = $("cursorReadout");
   if(calibrated()){ const d=pxToData(px,py); ro.textContent=`x: ${fmt(d.x)}   y: ${fmt(d.y)}`; }
   else ro.textContent=`px: ${Math.round(px)}, ${Math.round(py)}`;
 });
-canvas.addEventListener("mouseleave", () => { loupe.style.display="none"; });
+canvas.addEventListener("mouseleave", () => { loupe.style.display="none"; if(state.cursor){ state.cursor=null; render(); } });
 
 canvas.addEventListener("click", e => {
   if(!state.img || panning || justDragged) return;
@@ -406,10 +452,14 @@ $("delSel").onclick=deleteSelected;
 $("clearSel").onclick=()=>{ state.selPts=new Set(); render(); };
 const selModOf = e => ({ add:e.shiftKey, neg:$("selNeg").checked || e.altKey });
 // plain drag replaces the positive regions, Shift adds one, negative (checkbox / Alt) subtracts
-function addRegion(ser, poly, mod){
+function addRegion(ser, shape, mod){        // shape: polygon array, or {path,r} for a brush stroke
   ser.regs = ser.regs || [];
   if(!mod.neg && !mod.add) ser.regs = ser.regs.filter(r=>r.neg);
-  ser.regs.push({ poly, neg:!!mod.neg });
+  ser.regs.push({ ...(Array.isArray(shape) ? {poly:shape} : shape), neg:!!mod.neg });
+}
+// points of ser within r of the segment a-b get selected (or deselected when subtracting)
+function brushSelect(ser,a,b,r,mod){
+  for(const p of ser.points) if(segDist(p,a,b)<=r){ if(mod.neg) state.selPts.delete(p); else state.selPts.add(p); }
 }
 function nearestPoint(ser, px, py){
   let best=-1, bd=(12/state.scale)**2;
@@ -554,11 +604,19 @@ function regionBox(){
   return {x0,x1,y0,y1};
 }
 // rasterise polygons (their union) into a W*H 0/1 mask
-function buildMask(polys){
+function buildMask(regions){        // regions: [{poly} | {path,r}] -> union
   const W=state.imgData.width, H=state.imgData.height;
   const c=document.createElement("canvas"); c.width=W; c.height=H;
   const g=c.getContext("2d",{willReadFrequently:true});
-  for(const poly of polys){ g.beginPath(); poly.forEach((p,i)=> i ? g.lineTo(p.px,p.py) : g.moveTo(p.px,p.py)); g.closePath(); g.fill(); }
+  g.lineCap="round"; g.lineJoin="round";
+  for(const r of regions){
+    g.beginPath();
+    if(r.path){
+      g.lineWidth=2*r.r; r.path.forEach((p,i)=> i ? g.lineTo(p.px,p.py) : g.moveTo(p.px,p.py));
+      if(r.path.length===1) g.lineTo(r.path[0].px+0.01,r.path[0].py);
+      g.stroke();
+    } else { r.poly.forEach((p,i)=> i ? g.lineTo(p.px,p.py) : g.moveTo(p.px,p.py)); g.closePath(); g.fill(); }
+  }
   const a=g.getImageData(0,0,W,H).data, m=new Uint8Array(W*H);
   for(let i=0;i<m.length;i++) m[i]=a[i*4+3]>127?1:0;
   return m;
@@ -600,15 +658,15 @@ function regionOf(ser){
   let box;
   if(pos.length){
     let a=Infinity,b=-Infinity,c=Infinity,d=-Infinity;
-    for(const r of pos) for(const p of r.poly){ a=Math.min(a,p.px); b=Math.max(b,p.px); c=Math.min(c,p.py); d=Math.max(d,p.py); }
+    for(const r of pos){ const pad=r.path?r.r:0; for(const p of (r.path||r.poly)){ a=Math.min(a,p.px-pad); b=Math.max(b,p.px+pad); c=Math.min(c,p.py-pad); d=Math.max(d,p.py+pad); } }
     box={ x0:Math.max(0,Math.floor(a)), x1:Math.min(W-1,Math.ceil(b)), y0:Math.max(0,Math.floor(c)), y1:Math.min(H-1,Math.ceil(d)) };
   } else {
     const r=regionBox(), inset=3;
     box={ x0:Math.max(0,r.x0+inset), x1:Math.min(W-1,r.x1-inset), y0:Math.max(0,r.y0+inset), y1:Math.min(H-1,r.y1-inset) };
   }
   if(!pos.length && !neg.length && !ser.bound) return { ...box, mask:null };
-  const mask = pos.length ? buildMask(pos.map(r=>r.poly)) : new Uint8Array(W*H).fill(1);
-  if(neg.length){ const nm=buildMask(neg.map(r=>r.poly)); for(let i=0;i<mask.length;i++) if(nm[i]) mask[i]=0; }
+  const mask = pos.length ? buildMask(pos) : new Uint8Array(W*H).fill(1);
+  if(neg.length){ const nm=buildMask(neg); for(let i=0;i<mask.length;i++) if(nm[i]) mask[i]=0; }
   if(ser.bound) applyBound(mask,ser.bound,W,H);
   return { ...box, mask };
 }
@@ -1190,6 +1248,7 @@ function restore(){
 function undo(){ if(hist.i>0){ hist.i--; restore(); } }
 function redo(){ if(hist.i<hist.stack.length-1){ hist.i++; restore(); } }
 $("undoBtn").onclick=undo; $("redoBtn").onclick=redo;
+$("brushR").oninput=()=>{ $("brushVal").textContent=$("brushR").value; render(); };
 $("showFit").onchange=render; $("fitMode").onchange=render;
 
 window.addEventListener("keydown", e=>{
@@ -1199,7 +1258,7 @@ window.addEventListener("keydown", e=>{
   if(mod&&k==="y"){ e.preventDefault(); redo(); return; }
   if(mod||e.altKey) return;
   if(/^[1-9]$/.test(k)){ if(state.series[k-1]){ state.active=k-1; renderSeries(); render(); } return; }
-  const modes={a:"points",s:"select",d:"delete",l:"lasso",b:"box",g:"bound",t:"trace",h:"pan"};
+  const modes={a:"points",r:"brush",s:"select",d:"delete",l:"lasso",b:"box",g:"bound",t:"trace",h:"pan"};
   if(modes[k]){ setMode(modes[k]); return; }
   if(k==="escape"){ state.selPts=new Set(); render(); return; }
   if(!state.selPts.size) return;

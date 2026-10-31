@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Graph Digitizer</title>
-<link rel="stylesheet" href="styles.css?v=13">
+<link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
 <header id="topbar">
@@ -73,11 +73,13 @@
         <button class="mbtn" data-mode="trace" title="Click a curve: picks its colour and auto-traces it (T)">Trace</button>
         <button class="mbtn" data-mode="lasso" title="Drag a freeform region for the active series; auto extract then only looks inside it. Shift adds, Alt subtracts (L)">Lasso</button>
         <button class="mbtn" data-mode="box" title="Drag a rectangle region. Shift adds, Alt subtracts (B)">Box</button>
+        <button class="mbtn" data-mode="brush" title="Paint a region with a round brush (radius slider below). Shift adds, Alt subtracts (R)">Brush</button>
         <button class="mbtn" data-mode="bound" title="Drag the bound line / its nodes (G)">Bound</button>
         <button class="mbtn" data-mode="pan" title="Drag to pan">Pan</button>
       </div>
-      <div class="selrow"><select id="pselShape" class="tsel" title="Shape used by the Select tool"><option value="box">Select: box</option><option value="lasso">Select: lasso</option></select>
+      <div class="selrow"><select id="pselShape" class="tsel" title="Shape used by the Select tool"><option value="box">Select: box</option><option value="lasso">Select: lasso</option><option value="brush">Select: brush</option></select>
         <button class="btn small" id="delSel">Delete selected</button><button class="btn small" id="clearSel">Clear</button><span id="selCount"></span></div>
+      <label class="slider" title="Used by the Brush tool and the Select tool's brush shape (screen pixels)">Brush radius <span id="brushVal">16</span> px <input type="range" id="brushR" min="3" max="120" value="16"></label>
       <label class="chk"><input type="checkbox" id="selNeg"> Select / Lasso / Box subtract (or hold Alt; Shift adds)</label>
       <label class="chk"><input type="checkbox" id="snap"> Snap clicks to picked colour</label>
       <details id="boundBox">
@@ -165,6 +167,6 @@
   <div id="dataTableWrap"><table id="dataTable"></table></div>
 </div>
 
-<script src="app.js?v=13"></script>
+<script src="app.js?v=14"></script>
 </body>
 </html>

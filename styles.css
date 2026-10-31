@@ -140,3 +140,4 @@ details#boundBox summary{cursor:pointer;font-size:12px;color:var(--accent)}
 .selrow .btn{width:auto;margin:0}
 #selCount{font-size:12px;color:#ffe14d}
 #canvas.mode-select{cursor:crosshair}
+#canvas.mode-brush{cursor:none}
