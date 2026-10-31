@@ -93,7 +93,7 @@
 
       <details id="autoBox">
         <summary>Automatic extraction (by colour)</summary>
-        <p class="hint">Pick the curve or marker colour, then run. Searches the lasso / box regions and bound of the active series, or the calibrated area if none. Close curves are tracked probabilistically (a curve will not steal ink from another curve). With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
+        <p class="hint">Pick the curve or marker colour, then run. Searches the lasso / box regions and bound of the active series, or the calibrated area if none. Trace starts exactly at your click (within 10 px) and sets the tolerance from the line's contrast. For a bundle of same-coloured curves (even dashed or dotted), set the curve count and click the top one: each curve is followed as the smoothest path through the ink, bridging dash gaps, never sharing ink with another curve, and keeping its order. With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
         <label class="slider">Extract
           <select id="autoKind">
             <option value="curve">A curve (line)</option>

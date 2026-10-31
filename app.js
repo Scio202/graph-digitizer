@@ -20,6 +20,7 @@ const state = {
   lasso: null,          // in-progress freeform selection [{px,py}]
   box: null,            // in-progress box selection {a,b}
   selMod: null,         // {add,neg} modifiers of the selection being drawn
+  hint: null,           // Trace click: curves must start within 10 px of it
   bdrag: null,          // dragging a series-bound line / node
   nextId: 0, ocr: null,
   axes: undefined       // cached axis detection (reset per image)
@@ -413,8 +414,12 @@ function traceAt(px,py){
   }
   if(!best||bd<30*30*3){ alert("That spot looks like background. Click directly on the curve."); return; }
   setAutoColor(best);
+  // thin / anti-aliased / dashed lines are lighter than their darkest pixel: scale the tolerance to the contrast
+  const tol=Math.round(Math.max(40,Math.min(140,0.45*Math.sqrt(bd/3))));
+  $("tolerance").value=tol; $("tolVal").textContent=tol;
   if($("autoKind").value==="markers"){ const s=measureMarker(bx,by); if(s) $("markerSize").value=s; }
-  $("runAuto").onclick();
+  state.hint={px,py};
+  try{ $("runAuto").onclick(); } finally { state.hint=null; }
 }
 // nearest pixel of the picked colour within a small radius, refined to the centre of its stroke
 function snapPoint(px,py){
@@ -694,7 +699,7 @@ function measureMarker(cx,cy){
 
 // Trace up to n same-coloured curves inside ser's region (lasso if set, else the calibrated box).
 // Returns an array of point lists (top curve first) or null on failure.
-function traceCurves(ser, n){
+function traceCurves(ser, n, overwritten){
   const tol=+$("tolerance").value, step=+$("xstep").value;
   const {data,width:W,height:H}=state.imgData, tol2=tol*tol*3;
   const {r:tr,g:tg,b:tb}=state.autoColor, gap=2;
@@ -720,70 +725,116 @@ function traceCurves(ser, n){
   if(!cols.some(c=>c.clusters.length)){ alert("No matching pixels found. Raise the tolerance or re-pick the colour."); return null; }
 
   // 2. seed column: the one where the n thickest clusters are strongest (prefer columns that have all n)
+  //    (a click with the Trace tool seeds at the ink nearest the click, within 10 px, and nowhere else)
   const top=col=>col.clusters.slice().sort((a,b)=>b.n-a.n).slice(0,n);
   const score=col=>(col.clusters.length>=n?1e6:0)+top(col).reduce((s,c)=>s+c.n,0);
-  let si=0, bs=-1;
-  cols.forEach((col,i)=>{ const sc=score(col); if(sc>bs){ bs=sc; si=i; } });
-  const seeds=top(cols[si]).sort((a,b)=>a.c-b.c).map(cl=>({x:cols[si].x,y:cl.c,n:cl.n}));
-
-  // 3. probabilistic tracking. Each curve carries a Kalman state (position + slope, with growing uncertainty).
-  //    For every column, each (curve, cluster) pair gets a likelihood = how plausible that cluster is as the
-  //    curve's next position (distance in sigmas, plus thickness consistency). Clusters are then assigned to
-  //    curves jointly (Hungarian, one cluster per curve and vice versa), so two close curves can't both claim
-  //    the same ink and a curve prefers the globally most probable explanation rather than the nearest blob.
-  const QA=0.0009, GATE=16, MISS=4, BIG=1e4;
-  const follow=order=>{
-    const T=seeds.map(s=>({x:s.x,y:s.y,v:0,pyy:2,pyv:0,pvv:0.25,th:s.n,pts:[]}));
-    for(const col of order){
-      const C=col.clusters;
-      const P=T.map(t=>{          // predict every curve to this column
-        const dx=col.x-t.x, a=Math.abs(dx);
-        return { y:t.y+t.v*dx,
-                 yy:t.pyy+2*dx*t.pyv+dx*dx*t.pvv+QA*a*a*a/3,
-                 yv:t.pyv+dx*t.pvv+QA*dx*a/2,
-                 vv:t.pvv+QA*a };
-      });
-      // curves crossing: a cluster much thicker than the curves, spanning 2+ predictions, is a merge.
-      // Those curves coast on their prediction instead of snapping to the merged centre.
-      const coast=new Set(), dead=new Set();
-      C.forEach((cl,ci)=>{
-        const in_=T.map((t,ti)=>ti).filter(ti=>Math.abs(P[ti].y-cl.c)<=cl.n/2+2);
-        if(in_.length>=2 && cl.n>1.3*Math.max(...in_.map(ti=>T[ti].th))){ in_.forEach(ti=>coast.add(ti)); dead.add(ci); }
-      });
-      const rows=T.map((t,ti)=>ti).filter(ti=>!coast.has(ti));
-      const live=C.map((cl,ci)=>ci).filter(ci=>!dead.has(ci));
-      const match=new Map();
-      if(rows.length){
-        const cost=rows.map(ti=>[
-          ...live.map(ci=>{
-            const cl=C[ci], R=0.5+cl.n*cl.n/48, S=P[ti].yy+R, v=cl.c-P[ti].y, d2=v*v/S;
-            if(d2>GATE) return BIG;
-            const lt=Math.log(cl.n/T[ti].th)/0.45;
-            return 0.5*(d2+Math.log(S)+lt*lt);
-          }),
-          ...rows.map(()=>MISS)
-        ]);
-        const as=hungarian(cost,rows.length,live.length+rows.length);
-        rows.forEach((ti,r)=>{ if(as[r]<live.length && cost[r][as[r]]<BIG) match.set(ti,live[as[r]]); });
-      }
-      T.forEach((t,ti)=>{
-        const p=P[ti], ci=match.get(ti);
-        if(ci!==undefined){
-          const cl=C[ci], R=0.5+cl.n*cl.n/48, S=p.yy+R, inn=cl.c-p.y, Ky=p.yy/S, Kv=p.yv/S;
-          t.y=p.y+Ky*inn; t.v=t.v+Kv*inn;
-          t.pyy=p.yy-p.yy*p.yy/S; t.pyv=p.yv-p.yy*p.yv/S; t.pvv=p.vv-p.yv*p.yv/S;
-          t.th=0.8*t.th+0.2*cl.n; t.x=col.x;
-          t.pts.push({px:col.x,py:cl.c,q:Math.exp(-0.5*inn*inn/S)});
-        } else {                     // no measurement: advance on the prediction (uncertainty keeps growing)
-          t.y=p.y; t.pyy=p.yy; t.pyv=p.yv; t.pvv=p.vv; t.x=col.x;
-          if(coast.has(ti)) t.pts.push({px:col.x,py:p.y,q:0,coast:true});
-        }
-      });
+  let si=0, seeds;
+  if(state.hint){
+    const h=state.hint; let best=null, bd=100;
+    cols.forEach((col,i)=>col.clusters.forEach((cl,ci)=>{ const d=(col.x-h.px)**2+(cl.c-h.py)**2; if(d<=bd){ bd=d; best={i,cl,ci}; } }));
+    if(!best){ alert("No pixels of the picked colour within 10 px of your click. Click right on the curve, or raise the colour tolerance."); return null; }
+    si=best.i;
+    // the other curves of a bundle: nearest similar-thickness ink to the click, searched over a few columns
+    // either side (dashed curves have gaps), within 150 px, one seed per distinct ink
+    const picks=[{k:best.i,ci:best.ci,cl:best.cl}];
+    const cand=[];
+    for(let k=Math.max(0,si-3);k<=Math.min(cols.length-1,si+3);k++) cols[k].clusters.forEach((cl,ci)=>{
+      if(cl.n>=0.4*best.cl.n&&cl.n<=2.5*best.cl.n) cand.push({k,ci,cl,d:Math.hypot(cols[k].x-h.px,cl.c-h.py)});
+    });
+    cand.sort((a,b)=>a.d-b.d);
+    for(const c of cand){
+      if(picks.length>=n||c.d>150) break;
+      if(picks.every(p=>Math.abs(p.cl.c-c.cl.c)>=8)) picks.push(c);
     }
-    return T.map(t=>t.pts);
+    seeds=picks.sort((a,b)=>a.cl.c-b.cl.c).map(p=>({k:p.k,x:cols[p.k].x,y:p.cl.c,n:p.cl.n,ci:p.ci}));
+  } else {
+    let bs=-1;
+    cols.forEach((col,i)=>{ const sc=score(col); if(sc>bs){ bs=sc; si=i; } });
+    seeds=top(cols[si]).sort((a,b)=>a.c-b.c).map(cl=>({k:si,x:cols[si].x,y:cl.c,n:cl.n,ci:cols[si].clusters.indexOf(cl)}));
+  }
+
+  // 3. best path per curve by dynamic programming (Viterbi). A path is a chain of clusters, one per visited
+  //    column, scored by smoothness (acceleration energy over the last three clusters, so a curve may bend but
+  //    not hop to its neighbour), thickness consistency, and a small penalty per skipped column. Skipping up to
+  //    `maxGap` columns lets it cross the gaps of dashed / dotted lines on its own momentum. Curves are
+  //    extracted one after another and each claims its ink, so two curves can never share the same ink.
+  const maxGap=Math.max(2,Math.ceil(Math.max(+$("bridge").value,40)/step)+1);
+  const SKIP=0.15, R_COL=1.2, W_TH=0.4, W_ACC=8, W_SUP=10, P_SHARE=3, BEAM=40;   // R_COL: reward per column advanced, so a curve keeps going
+  const hit=(x,y)=>{
+    if(x<0||y<0||x>=W||y>=H||(mask&&!mask[y*W+x])) return false;
+    const i=(y*W+x)*4, dr=data[i]-tr, dg=data[i+1]-tg, db=data[i+2]-tb; return dr*dr+dg*dg+db*db<=tol2;
   };
-  const right=follow(cols.slice(si+1)), left=follow(cols.slice(0,si).reverse());
-  const tracks=seeds.map((s,k)=>[...left[k].reverse(),{px:s.x,py:s.y,q:1},...right[k]]);
+  // fraction of the straight segment between two cluster centres that lies on ink of the picked colour
+  const support=(xa,ya,xb,yb)=>{
+    const n=Math.max(1,Math.abs(xb-xa)); let ok=0;
+    for(let t=0;t<=n;t++){
+      const x=Math.round(xa+(xb-xa)*t/n), y=Math.round(ya+(yb-ya)*t/n);
+      if(hit(x,y)||hit(x,y-1)||hit(x,y+1)||hit(x-1,y)||hit(x+1,y)) ok++;
+    }
+    return ok/(n+1);
+  };
+  const claimed=cols.map(c=>c.clusters.map(()=>false));
+  // ink already digitized in other series counts as taken, so a new curve can't wander onto a finished one
+  state.series.forEach(o=>{
+    if(o===ser||(overwritten&&overwritten.includes(o))) return;
+    for(const p of o.points){
+      const k=Math.round((p.px-cols[0].x)/step); if(k<0||k>=cols.length||Math.abs(cols[k].x-p.px)>step) continue;
+      cols[k].clusters.forEach((cl,ci)=>{ if(Math.abs(cl.c-p.py)<=Math.max(3,cl.n/2+2)) claimed[k][ci]=true; });
+    }
+  });
+    const bestPath=(seed,dir,above)=>{   // above[k] = y of the previous (higher) curve in column k, if any
+    const byCol=new Map();      // column -> Map(key -> entry)
+    const add=(k,e)=>{ let m=byCol.get(k); if(!m){ m=new Map(); byCol.set(k,m); } const key=e.ci+"|"+(e.parent?e.parent.k+":"+e.parent.ci:"-"); const o=m.get(key); if(!o||e.cost<o.cost) m.set(key,e); };
+    add(seed.k,{k:seed.k,ci:seed.ci,cl:cols[seed.k].clusters[seed.ci],parent:null,cost:0,count:0,th:seed.n,loc:0});
+    let best=null, bv=Infinity;
+    for(let k=seed.k;k>=0&&k<cols.length;k+=dir){
+      const m=byCol.get(k); if(!m) continue;
+      let list=[...m.values()];
+      if(list.length>BEAM){ list.sort((a,b)=>a.cost-b.cost); list=list.slice(0,BEAM); }   // keep the best few paths per column
+      for(const e of list){
+        if(e.parent&&e.cost<bv){ bv=e.cost; best=e; }
+        for(let g=1;g<=maxGap;g++){
+          const j=k+dir*g; if(j<0||j>=cols.length) break;
+          const cl=cols[j].clusters;
+          for(let bi=0;bi<cl.length;bi++){
+            const b=cl[bi], xi=cols[k].x, xj=cols[j].x, s2=(b.c-e.cl.c)/(xj-xi);
+            let acc=0;
+            if(e.parent){ const xh=cols[e.parent.k].x, s1=(e.cl.c-e.parent.cl.c)/(xi-xh); acc=W_ACC*(s2-s1)*(s2-s1)/(Math.abs(xj-xh)/2); }
+            const lt=Math.log(b.n/(e.th*Math.sqrt(1+s2*s2)))/0.45;
+            // a sideways move away from the momentum line is only believable if there is ink along the way
+            const yp=e.parent ? e.cl.c+(e.cl.c-e.parent.cl.c)/(xi-cols[e.parent.k].x)*(xj-xi) : e.cl.c;
+            const dev=Math.abs(b.c-yp);
+            const sup = dev>4 ? support(xi,e.cl.c,xj,b.c) : 1;
+            let loc=acc+W_TH*Math.min(lt*lt,4)+(dev>4 ? W_SUP*(1-sup)*(1-sup)*((dev-4)/8)**2 : 0);
+            if(claimed[j][bi] && b.n<=2.5*seed.n) loc+=P_SHARE;                         // ink another curve already uses
+            if(above && above[j]!==undefined && b.c+b.n/2<above[j]-1) loc+=3+0.5*(above[j]-1-b.c-b.n/2);   // curves keep their order (a merged blob may reach down to this curve)
+            const c=e.cost+loc+SKIP*(g-1)-R_COL*g;
+            add(j,{k:j,ci:bi,cl:b,parent:e,cost:c,count:e.count+1,th:0.8*e.th+0.2*b.n/Math.sqrt(1+s2*s2),loc});
+          }
+        }
+      }
+    }
+    const path=[]; for(let e=best;e&&e.parent;e=e.parent) path.push(e);
+    return path;     // far end first
+  };
+  let above=null;
+  const tracks=seeds.map(seed=>{
+    const prev=above||[];
+    const right=bestPath(seed,1,above), left=bestPath(seed,-1,above);
+    const used=[...left,...right];
+    const pts=[...left.reverse(),{k:seed.k,ci:seed.ci,loc:0},...right.reverse()].map(e=>{ return e; });
+    used.forEach(e=>{ if(cols[e.k].clusters[e.ci].n<=2.5*seed.n) claimed[e.k][e.ci]=true; });
+    claimed[seed.k][seed.ci]=true;
+    above=above||[];
+    const out=pts.map(e=>{
+      const cl=cols[e.k].clusters[e.ci], a=prev[e.k];
+      // inside a merged blob the centre belongs to the whole bundle: keep this curve just below the one above it
+      const y = (a!==undefined && cl.n>1.5*seed.n && cl.c<a+1) ? a+2 : cl.c;
+      return {px:cols[e.k].x, py:y, q:Math.exp(-e.loc)};
+    });
+    out.forEach((p,i)=>{ const k=pts[i].k; if(above[k]===undefined||p.py>above[k]) above[k]=p.py; });
+    return out;
+  });
 
   // 4. never put two curves in the same spot: where two tracks have a point in the same column closer than a
   //    curve thickness, keep the real measurement (over a coasted one), else the more probable, and drop the other
@@ -808,32 +859,10 @@ function traceCurves(ser, n){
   if(!out.length){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
   return out;
 }
-// minimum-cost assignment of n rows to m>=n columns (Hungarian / Jonker-Volgenant); returns column per row
-function hungarian(cost,n,m){
-  const u=new Float64Array(n+1), v=new Float64Array(m+1), p=new Int32Array(m+1), way=new Int32Array(m+1);
-  for(let i=1;i<=n;i++){
-    p[0]=i; let j0=0; const minv=new Float64Array(m+1).fill(Infinity), used=new Uint8Array(m+1);
-    do{
-      used[j0]=1; const i0=p[j0]; let delta=Infinity, j1=0;
-      for(let jj=1;jj<=m;jj++) if(!used[jj]){
-        const cur=cost[i0-1][jj-1]-u[i0]-v[jj];
-        if(cur<minv[jj]){ minv[jj]=cur; way[jj]=j0; }
-        if(minv[jj]<delta){ delta=minv[jj]; j1=jj; }
-      }
-      for(let jj=0;jj<=m;jj++){ if(used[jj]){ u[p[jj]]+=delta; v[jj]-=delta; } else minv[jj]-=delta; }
-      j0=j1;
-    } while(p[j0]!==0);
-    do{ const j1=way[j0]; p[j0]=p[j1]; j0=j1; } while(j0);
-  }
-  const ans=new Array(n);
-  for(let jj=1;jj<=m;jj++) if(p[jj]) ans[p[jj]-1]=jj-1;
-  return ans;
-}
-
 // Trace into series `si`; extra curves go into the following series (created if missing).
 function extractInto(si, n){
   const markers=$("autoKind").value==="markers";
-  const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean) : traceCurves(state.series[si], n);
+  const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean) : traceCurves(state.series[si], n, state.series.slice(si,si+n));
   if(!tracks||!tracks.length) return false;
   const act=state.active;
   tracks.forEach((pts,k)=>{
