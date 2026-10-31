@@ -867,7 +867,7 @@ function extractInto(si, n){
   const act=state.active;
   tracks.forEach((pts,k)=>{
     while(si+k>=state.series.length) addSeries();
-    state.series[si+k].points=pts;
+    state.series[si+k].points=pts.slice().sort((a,b)=>a.px-b.px);
   });
   state.active=act; renderSeries(); afterEdit();
   return true;
