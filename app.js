@@ -403,23 +403,41 @@ function bgRGB(){
   return state.bg=best;
 }
 function setAutoColor(col){ state.autoColor=col; $("colorSwatch").style.background=`rgb(${col.r},${col.g},${col.b})`; }
-// click near a thin curve: take the pixel in a small window that differs most from the background
+// Trace tool. A click is only accurate to a few screen pixels, which is many image pixels when zoomed out, so:
+// look within 10 *screen* px of the click, snap to the nearest clearly-inked pixel, take the colour there, and
+// start the trace from that snapped spot. Each trace goes into a fresh series if the active one already has points.
 function traceAt(px,py){
   if(!state.imgData){ alert("Load an image first."); return; }
-  const {data,width:W,height:H}=state.imgData, bg=bgRGB(), cx=Math.round(px), cy=Math.round(py);
-  let best=null, bd=-1, bx=cx, by=cy;
-  for(let y=Math.max(0,cy-3);y<=Math.min(H-1,cy+3);y++) for(let x=Math.max(0,cx-3);x<=Math.min(W-1,cx+3);x++){
-    const i=(y*W+x)*4, d=(data[i]-bg.r)**2+(data[i+1]-bg.g)**2+(data[i+2]-bg.b)**2;
-    if(d>bd){ bd=d; best={r:data[i],g:data[i+1],b:data[i+2]}; bx=x; by=y; }
+  const {data,width:W,height:H}=state.imgData, bg=bgRGB();
+  const R=Math.max(6,Math.round(10/state.scale)), cx=Math.round(px), cy=Math.round(py);
+  const con=(x,y)=>{ const i=(y*W+x)*4; return (data[i]-bg.r)**2+(data[i+1]-bg.g)**2+(data[i+2]-bg.b)**2; };
+  let top=0;
+  for(let y=Math.max(0,cy-R);y<=Math.min(H-1,cy+R);y++) for(let x=Math.max(0,cx-R);x<=Math.min(W-1,cx+R);x++) top=Math.max(top,con(x,y));
+  if(top<30*30*3){ alert("Nothing but background within 10 px of that click. Click on the curve."); return; }
+  // nearest pixel that is at least half as contrasty as the strongest in reach
+  let bx=cx, by=cy, bd=Infinity;
+  for(let y=Math.max(0,cy-R);y<=Math.min(H-1,cy+R);y++) for(let x=Math.max(0,cx-R);x<=Math.min(W-1,cx+R);x++){
+    const d=(x-px)**2+(y-py)**2; if(d<bd && con(x,y)>=0.25*top){ bd=d; bx=x; by=y; }
   }
-  if(!best||bd<30*30*3){ alert("That spot looks like background. Click directly on the curve."); return; }
+  // colour = the most contrasty pixel right at the snapped spot
+  let best=null, bc=-1;
+  for(let y=Math.max(0,by-2);y<=Math.min(H-1,by+2);y++) for(let x=Math.max(0,bx-2);x<=Math.min(W-1,bx+2);x++){
+    const c=con(x,y); if(c>bc){ bc=c; const i=(y*W+x)*4; best={r:data[i],g:data[i+1],b:data[i+2]}; }
+  }
   setAutoColor(best);
   // thin / anti-aliased / dashed lines are lighter than their darkest pixel: scale the tolerance to the contrast
-  const tol=Math.round(Math.max(40,Math.min(140,0.45*Math.sqrt(bd/3))));
+  const tol=Math.round(Math.max(40,Math.min(140,0.45*Math.sqrt(bc/3))));
   $("tolerance").value=tol; $("tolVal").textContent=tol;
-  if($("autoKind").value==="markers"){ const s=measureMarker(bx,by); if(s) $("markerSize").value=s; }
-  state.hint={px,py};
-  try{ $("runAuto").onclick(); } finally { state.hint=null; }
+  if($("autoKind").value==="markers"){ const m=measureMarker(bx,by); if(m) $("markerSize").value=m; }
+  const cur=state.series[state.active], created=!cur || cur.points.length>0;
+  if(created) addSeries();
+  state.hint={px:bx,py:by};
+  try{ $("runAuto").onclick(); }
+  finally {
+    state.hint=null;
+    const fresh=state.series[state.active];
+    if(created && fresh && !fresh.points.length) deleteSeries(state.active);   // failed: don't leave an empty series behind
+  }
 }
 // nearest pixel of the picked colour within a small radius, refined to the centre of its stroke
 function snapPoint(px,py){
@@ -759,7 +777,7 @@ function traceCurves(ser, n, overwritten){
   //    `maxGap` columns lets it cross the gaps of dashed / dotted lines on its own momentum. Curves are
   //    extracted one after another and each claims its ink, so two curves can never share the same ink.
   const maxGap=Math.max(2,Math.ceil(Math.max(+$("bridge").value,40)/step)+1);
-  const SKIP=0.15, R_COL=1.2, W_TH=0.4, W_ACC=8, W_SUP=10, P_SHARE=3, BEAM=40;   // R_COL: reward per column advanced, so a curve keeps going
+  const SKIP=0.15, R_COL=1.2, W_TH=0.4, W_ACC=8, W_SUP=10, P_SHARE=6, BEAM=40;   // R_COL: reward per column advanced, so a curve keeps going
   const hit=(x,y)=>{
     if(x<0||y<0||x>=W||y>=H||(mask&&!mask[y*W+x])) return false;
     const i=(y*W+x)*4, dr=data[i]-tr, dg=data[i+1]-tg, db=data[i+2]-tb; return dr*dr+dg*dg+db*db<=tol2;
@@ -782,7 +800,7 @@ function traceCurves(ser, n, overwritten){
       cols[k].clusters.forEach((cl,ci)=>{ if(Math.abs(cl.c-p.py)<=Math.max(3,cl.n/2+2)) claimed[k][ci]=true; });
     }
   });
-    const bestPath=(seed,dir,above)=>{   // above[k] = y of the previous (higher) curve in column k, if any
+    const bestPath=(seed,dir,above,below)=>{   // above[k] = y of the previous (higher) curve in column k, if any
     const byCol=new Map();      // column -> Map(key -> entry)
     const add=(k,e)=>{ let m=byCol.get(k); if(!m){ m=new Map(); byCol.set(k,m); } const key=e.ci+"|"+(e.parent?e.parent.k+":"+e.parent.ci:"-"); const o=m.get(key); if(!o||e.cost<o.cost) m.set(key,e); };
     add(seed.k,{k:seed.k,ci:seed.ci,cl:cols[seed.k].clusters[seed.ci],parent:null,cost:0,count:0,th:seed.n,loc:0});
@@ -807,6 +825,7 @@ function traceCurves(ser, n, overwritten){
             const sup = dev>4 ? support(xi,e.cl.c,xj,b.c) : 1;
             let loc=acc+W_TH*Math.min(lt*lt,4)+(dev>4 ? W_SUP*(1-sup)*(1-sup)*((dev-4)/8)**2 : 0);
             if(claimed[j][bi] && b.n<=2.5*seed.n) loc+=P_SHARE;                         // ink another curve already uses
+            if(below && below[j]!==undefined && b.c-b.n/2>below[j]+1) loc+=3+0.5*(b.c-b.n/2-below[j]-1);
             if(above && above[j]!==undefined && b.c+b.n/2<above[j]-1) loc+=3+0.5*(above[j]-1-b.c-b.n/2);   // curves keep their order (a merged blob may reach down to this curve)
             const c=e.cost+loc+SKIP*(g-1)-R_COL*g;
             add(j,{k:j,ci:bi,cl:b,parent:e,cost:c,count:e.count+1,th:0.8*e.th+0.2*b.n/Math.sqrt(1+s2*s2),loc});
@@ -817,10 +836,28 @@ function traceCurves(ser, n, overwritten){
     const path=[]; for(let e=best;e&&e.parent;e=e.parent) path.push(e);
     return path;     // far end first
   };
-  let above=null;
+  // keep curve order: series already digitized that lie above / below this curve at the click bound it
+  let above=null, below=null;
+  if($("keepOrder").checked && state.hint){
+    const sx=seeds[0].x, sy=seeds[0].y, A=[], B=[];
+    state.series.forEach(o=>{
+      if(o===ser||(overwritten&&overwritten.includes(o))||!o.points.length) return;
+      const near=o.points.filter(p=>Math.abs(p.px-sx)<=3*step);
+      if(!near.length) return;
+      const oy=near.reduce((a,p)=>a+p.py,0)/near.length;
+      if(Math.abs(oy-sy)<3) return;                       // sits on the clicked ink: no side to take
+      for(const p of o.points){
+        const k=Math.round((p.px-cols[0].x)/step); if(k<0||k>=cols.length) continue;
+        if(oy<sy){ if(A[k]===undefined||p.py>A[k]) A[k]=p.py; } else { if(B[k]===undefined||p.py<B[k]) B[k]=p.py; }
+      }
+    });
+    if(A.length) above=A;
+    if(B.length) below=B;
+  }
+  const keep=$("keepOrder").checked;
   const tracks=seeds.map(seed=>{
     const prev=above||[];
-    const right=bestPath(seed,1,above), left=bestPath(seed,-1,above);
+    const right=bestPath(seed,1,keep?above:null,keep?below:null), left=bestPath(seed,-1,keep?above:null,keep?below:null);
     const used=[...left,...right];
     const pts=[...left.reverse(),{k:seed.k,ci:seed.ci,loc:0},...right.reverse()].map(e=>{ return e; });
     used.forEach(e=>{ if(cols[e.k].clusters[e.ci].n<=2.5*seed.n) claimed[e.k][e.ci]=true; });
