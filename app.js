@@ -14,7 +14,7 @@ const state = {
   logX: false, logY: false,
   series: [], active: 0,
   autoColor: null,
-  selPt: null,          // selected point (drag / nudge / delete)
+  selPts: new Set(),    // selected points (drag / nudge / delete act on all of them)
   drag: null,
   bg: undefined,        // cached background colour
   lasso: null,          // in-progress freeform selection [{px,py}]
@@ -157,10 +157,11 @@ function render(){
       }
     }
   });
-  if(state.selPt){
+  if(state.selPts.size){
     ctx.strokeStyle="#ffe14d"; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.arc(state.selPt.px*s, state.selPt.py*s, 8, 0, Math.PI*2); ctx.stroke();
+    state.selPts.forEach(p=>{ ctx.beginPath(); ctx.arc(p.px*s, p.py*s, 8, 0, Math.PI*2); ctx.stroke(); });
   }
+  $("selCount").textContent = state.selPts.size ? state.selPts.size+" selected" : "";
 }
 // boundary of a "look only above/below this curve" region (kept side tinted)
 function drawBound(ser){
@@ -280,13 +281,27 @@ canvas.addEventListener("mousedown", e => {
     }
   }
   else if(state.mode==="points" && state.series[state.active]){
-    const ser=state.series[state.active], {px,py}=canvasToNatural(e), i=nearestPoint(ser,px,py);
-    if(i>=0){ state.drag={ser,pt:ser.points[i],moved:false}; state.selPt=ser.points[i]; render(); }
+    const ser=state.series[state.active], p=canvasToNatural(e), i=nearestPoint(ser,p.px,p.py);
+    if(i>=0) startDrag(ser.points[i],p);
+  }
+  else if(state.mode==="select" && state.series[state.active]){
+    const ser=state.series[state.active], p=canvasToNatural(e), i=nearestPoint(ser,p.px,p.py);
+    if(i>=0 && state.selPts.has(ser.points[i])) startDrag(ser.points[i],p);          // drag the selection
+    else { state.selMod=selModOf(e); if($("pselShape").value==="lasso") state.lasso=[p]; else state.box={a:p,b:p}; }
   }
 });
+// press on a point: it (or the whole selection, if it is part of one) follows the mouse
+function startDrag(pt,p){
+  if(!state.selPts.has(pt)) state.selPts=new Set([pt]);
+  state.drag={ moved:false, p0:p, orig:[...state.selPts].map(q=>({q,x:q.px,y:q.py})) };
+  render();
+}
 window.addEventListener("mousemove", e => {
   if(panning && panStart){ wrap.scrollLeft=panStart.l-(e.clientX-panStart.x); wrap.scrollTop=panStart.t-(e.clientY-panStart.y); }
-  if(state.drag){ const p=canvasToNatural(e); Object.assign(state.drag.pt,p); delete state.drag.pt.q; state.drag.moved=true; render(); }
+  if(state.drag){
+    const p=canvasToNatural(e), d=state.drag, dx=p.px-d.p0.px, dy=p.py-d.p0.py;
+    if(d.moved || Math.hypot(dx,dy)*state.scale>=2){ d.moved=true; d.orig.forEach(o=>{ o.q.px=o.x+dx; o.q.py=o.y+dy; delete o.q.q; }); render(); }
+  }
   if(state.box){ state.box.b=canvasToNatural(e); render(); }
   if(state.bdrag){
     const b=state.series[state.active].bound, p=canvasToNatural(e);
@@ -304,18 +319,20 @@ window.addEventListener("mouseup", () => {
   if(state.drag){
     const d=state.drag; state.drag=null;
     justDragged=true; setTimeout(()=>justDragged=false,0);   // swallow the click that follows
-    if(d.moved){ sortPoints(d.ser); afterEdit(); }
+    if(d.moved){ state.series.forEach(sortPoints); afterEdit(); }
   }
   const ser=state.series[state.active];
   if(state.lasso){
-    if(state.lasso.length>=3 && ser) addRegion(ser,state.lasso,state.selMod);
-    state.lasso=null; renderSeries(); render(); commit();
+    const poly=state.lasso; state.lasso=null;
+    if(state.mode==="select"){ if(ser) selectPts(ser,poly.length>=3?poly:null,state.selMod); }
+    else { if(poly.length>=3 && ser) addRegion(ser,poly,state.selMod); renderSeries(); render(); commit(); }
   }
   if(state.box){
     const {a,b}=state.box; state.box=null;
-    if(ser && Math.abs(a.px-b.px)*state.scale>=4 && Math.abs(a.py-b.py)*state.scale>=4)
-      addRegion(ser,[a,{px:b.px,py:a.py},b,{px:a.px,py:b.py}],state.selMod);
-    renderSeries(); render(); commit();
+    const big=Math.abs(a.px-b.px)*state.scale>=4 && Math.abs(a.py-b.py)*state.scale>=4;
+    const poly=[a,{px:b.px,py:a.py},b,{px:a.px,py:b.py}];
+    if(state.mode==="select"){ if(ser) selectPts(ser,big?poly:null,state.selMod); }
+    else { if(ser && big) addRegion(ser,poly,state.selMod); renderSeries(); render(); commit(); }
   }
   if(state.bdrag){
     const b=ser.bound; state.bdrag=null; b.nodes.sort((p,q)=>p.px-q.px); render(); commit();
@@ -359,10 +376,34 @@ canvas.addEventListener("click", e => {
   if(!ser) return;
   if(state.mode==="points"){
     const pt = $("snap").checked ? (snapPoint(px,py) || {px,py}) : {px,py};
-    ser.points.push(pt); state.selPt=pt; sortPoints(ser); afterEdit();
+    ser.points.push(pt); state.selPts=new Set([pt]); sortPoints(ser); afterEdit();
   }
   else if(state.mode==="delete"){ const idx=nearestPoint(ser,px,py); if(idx>=0){ ser.points.splice(idx,1); afterEdit(); } }
 });
+function inPoly(poly,x,y){
+  let c=false;
+  for(let i=0,k=poly.length-1;i<poly.length;k=i++){
+    const a=poly[i], b=poly[k];
+    if((a.py>y)!==(b.py>y) && x<(b.px-a.px)*(y-a.py)/(b.py-a.py)+a.px) c=!c;
+  }
+  return c;
+}
+// select points of ser inside poly (null = a plain click: clear). Shift adds, Alt / the Subtract box removes.
+function selectPts(ser,poly,mod){
+  const inside=poly ? ser.points.filter(p=>inPoly(poly,p.px,p.py)) : [];
+  if(!poly){ if(!mod.add&&!mod.neg) state.selPts=new Set(); }
+  else if(mod.neg) inside.forEach(p=>state.selPts.delete(p));
+  else if(mod.add) inside.forEach(p=>state.selPts.add(p));
+  else state.selPts=new Set(inside);
+  render();
+}
+function deleteSelected(){
+  if(!state.selPts.size) return;
+  state.series.forEach(s=>{ s.points=s.points.filter(p=>!state.selPts.has(p)); });
+  state.selPts=new Set(); afterEdit();
+}
+$("delSel").onclick=deleteSelected;
+$("clearSel").onclick=()=>{ state.selPts=new Set(); render(); };
 const selModOf = e => ({ add:e.shiftKey, neg:$("selNeg").checked || e.altKey });
 // plain drag replaces the positive regions, Shift adds one, negative (checkbox / Alt) subtracts
 function addRegion(ser, poly, mod){
@@ -426,11 +467,13 @@ function traceAt(px,py){
   }
   setAutoColor(best);
   // thin / anti-aliased / dashed lines are lighter than their darkest pixel: scale the tolerance to the contrast
-  const tol=Math.round(Math.max(40,Math.min(140,0.45*Math.sqrt(bc/3))));
-  $("tolerance").value=tol; $("tolVal").textContent=tol;
+  if($("advanced").checked){
+    const tol=Math.round(Math.max(40,Math.min(140,0.45*Math.sqrt(bc/3))));
+    $("tolerance").value=tol; $("tolVal").textContent=tol;
+  }
   if($("autoKind").value==="markers"){ const m=measureMarker(bx,by); if(m) $("markerSize").value=m; }
   if(!state.series[state.active]) addSeries();
-  state.hint={px:bx,py:by};
+  state.hint=$("advanced").checked ? {px:bx,py:by} : null;   // the classic tracer ignores where you clicked
   try{ $("runAuto").onclick(); } finally { state.hint=null; }
 }
 // nearest pixel of the picked colour within a small radius, refined to the centre of its stroke
@@ -934,7 +977,7 @@ function traceClassic(ser){
 // Trace into series `si`; extra curves go into the following series (created if missing).
 function extractInto(si, n){
   const markers=$("autoKind").value==="markers";
-  const classic=$("classic").checked;
+  const classic=!$("advanced").checked;
   const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean)
     : classic ? [traceClassic(state.series[si])].filter(Boolean)
     : traceCurves(state.series[si], n, state.series.slice(si,si+n));
@@ -955,7 +998,7 @@ function autoPrecheck(){
 $("runAuto").onclick = ()=>{
   if(!autoPrecheck()) return;
   if(!state.series[state.active]){ alert("Add a series first."); return; }
-  const n=$("autoKind").value==="markers" ? 1 : Math.max(1,Math.min(12,Math.round(+$("nCurves").value)||1));
+  const n=($("autoKind").value==="markers"||!$("advanced").checked) ? 1 : Math.max(1,Math.min(12,Math.round(+$("nCurves").value)||1));
   const clobber=state.series.slice(state.active+1,state.active+n).some(s=>s.points.length);
   if(clobber && !confirm("Extra curves are written into the next series, replacing their points. Continue?")) return;
   extractInto(state.active,n);
@@ -1141,7 +1184,7 @@ function commit(){
 }
 function restore(){
   const o=JSON.parse(hist.stack[hist.i]);
-  state.series=o.s; state.active=Math.max(0,Math.min(o.a,o.s.length-1)); state.selPt=null;
+  state.series=o.s; state.active=Math.max(0,Math.min(o.a,o.s.length-1)); state.selPts=new Set();
   renderSeries(); render(); refreshData();
 }
 function undo(){ if(hist.i>0){ hist.i--; restore(); } }
@@ -1156,14 +1199,13 @@ window.addEventListener("keydown", e=>{
   if(mod&&k==="y"){ e.preventDefault(); redo(); return; }
   if(mod||e.altKey) return;
   if(/^[1-9]$/.test(k)){ if(state.series[k-1]){ state.active=k-1; renderSeries(); render(); } return; }
-  const modes={a:"points",d:"delete",l:"lasso",b:"box",g:"bound",t:"trace",h:"pan"};
+  const modes={a:"points",s:"select",d:"delete",l:"lasso",b:"box",g:"bound",t:"trace",h:"pan"};
   if(modes[k]){ setMode(modes[k]); return; }
-  if(k==="escape"){ state.selPt=null; render(); return; }
-  const ser=state.series.find(s=>s.points.includes(state.selPt));
-  if(!ser) return;
+  if(k==="escape"){ state.selPts=new Set(); render(); return; }
+  if(!state.selPts.size) return;
   const st=e.shiftKey?5:1, mv={arrowleft:[-st,0],arrowright:[st,0],arrowup:[0,-st],arrowdown:[0,st]}[k];
-  if(mv){ e.preventDefault(); state.selPt.px+=mv[0]; state.selPt.py+=mv[1]; sortPoints(ser); afterEdit(); }
-  else if(k==="delete"||k==="backspace"){ e.preventDefault(); ser.points.splice(ser.points.indexOf(state.selPt),1); state.selPt=null; afterEdit(); }
+  if(mv){ e.preventDefault(); state.selPts.forEach(q=>{ q.px+=mv[0]; q.py+=mv[1]; delete q.q; }); state.series.forEach(sortPoints); afterEdit(); }
+  else if(k==="delete"||k==="backspace"){ e.preventDefault(); deleteSelected(); }
 });
 
 // ============================================================ OCR for reference values (tesseract.js, loaded on demand)
@@ -1252,6 +1294,16 @@ async function ocrFill(keys){
   } catch(err){ st.textContent=""; alert(err.message||err); }
 }
 $("ocrBtn").onclick=()=>ocrFill(["X1","X2","Y1","Y2"].filter(k=>state.cal[k]));
+
+// ============================================================ UI: info toggles, advanced options
+document.querySelectorAll(".hint").forEach(h=>{
+  if(h.id==="ocrStatus"||h.id==="boundInfo") return;
+  const b=document.createElement("button"); b.type="button"; b.className="ibtn"; b.textContent="i"; b.title="Show / hide info";
+  h.hidden=true; h.parentNode.insertBefore(b,h);
+  b.onclick=e=>{ e.preventDefault(); h.hidden=!h.hidden; b.classList.toggle("on",!h.hidden); };
+});
+function syncAdvanced(){ $("advOpts").hidden=!$("advanced").checked; }
+$("advanced").onchange=syncAdvanced; syncAdvanced();
 
 // ============================================================ layout: resizable sidebar, collapsible panels
 (function(){

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Graph Digitizer</title>
-<link rel="stylesheet" href="styles.css?v=12">
+<link rel="stylesheet" href="styles.css?v=13">
 </head>
 <body>
 <header id="topbar">
@@ -68,6 +68,7 @@
       <h2><span class="step">4</span> Extract points</h2>
       <div class="mode-row">
         <button class="mbtn" data-mode="points" title="Click to add points; drag a point to move it; arrow keys nudge, Del removes (A)">Add</button>
+        <button class="mbtn" data-mode="select" title="Select points with a box or lasso, then drag, nudge (arrows) or delete (Del) them all (S)">Select</button>
         <button class="mbtn" data-mode="delete" title="Click a point to remove it">Delete</button>
         <button class="mbtn" data-mode="trace" title="Click a curve: picks its colour and auto-traces it (T)">Trace</button>
         <button class="mbtn" data-mode="lasso" title="Drag a freeform region for the active series; auto extract then only looks inside it. Shift adds, Alt subtracts (L)">Lasso</button>
@@ -75,11 +76,13 @@
         <button class="mbtn" data-mode="bound" title="Drag the bound line / its nodes (G)">Bound</button>
         <button class="mbtn" data-mode="pan" title="Drag to pan">Pan</button>
       </div>
-      <label class="chk"><input type="checkbox" id="selNeg"> Lasso / Box subtracts (negative; or hold Alt, Shift adds)</label>
+      <div class="selrow"><select id="pselShape" class="tsel" title="Shape used by the Select tool"><option value="box">Select: box</option><option value="lasso">Select: lasso</option></select>
+        <button class="btn small" id="delSel">Delete selected</button><button class="btn small" id="clearSel">Clear</button><span id="selCount"></span></div>
+      <label class="chk"><input type="checkbox" id="selNeg"> Select / Lasso / Box subtract (or hold Alt; Shift adds)</label>
       <label class="chk"><input type="checkbox" id="snap"> Snap clicks to picked colour</label>
       <details id="boundBox">
         <summary>Look only above / below another curve</summary>
-        <p class="hint">Uses a digitized series as the boundary for the active series. Drag the dashed line (or its nodes) with the Bound tool; the offset moves the whole line.</p>
+        <p class="hint">Uses a digitized series as the boundary. Drag the dashed line or its nodes with the Bound tool (G).</p>
         <label class="slider">Reference series <select id="boundRef"></select></label>
         <label class="slider">Search <select id="boundSide"><option value="above">above it (smaller y on screen)</option><option value="below">below it</option></select></label>
         <label class="slider">Offset (px, + = down) <input type="number" id="boundOff" step="0.5" value="0" class="num"></label>
@@ -91,16 +94,16 @@
       <button class="btn small" id="clearSeries">Clear this series</button>
       <button class="btn small" id="clearRegion">Clear lasso / box regions</button>
 
-      <details id="autoBox">
+      <details id="autoBox" open>
         <summary>Automatic extraction (by colour)</summary>
-        <p class="hint">Pick the curve or marker colour, then run. Searches the lasso / box regions and bound of the active series, or the calibrated area if none. Trace snaps to the nearest ink within 10 screen px of your click, starts there, and traces into the active series (for a bundle, trace top to bottom, adding a series for each) and sets the tolerance from the line's contrast. For a bundle of same-coloured curves (even dashed or dotted), set the curve count and click the top one: each curve is followed as the smoothest path through the ink, bridging dash gaps, never sharing ink with another curve, and keeping its order. With several same-coloured curves, set the count: the top curve fills the active series and the rest fill the following series (created if needed).</p>
+        <p class="hint">Pick the colour (Pick colour or Trace), then run. Searches the series' lasso / box regions and bound, else the calibrated area. Advanced tracer: Trace starts at your click; set the curve count and click the top curve of a bundle.</p>
         <label class="slider">Extract
           <select id="autoKind">
             <option value="curve">A curve (line)</option>
             <option value="markers">Markers (circles, triangles, squares; filled or outline)</option>
           </select>
         </label>
-        <label class="slider">Marker size (px, 0 = auto; Trace on a marker measures it). Calibrate or lasso the plot area first so axis text is not mistaken for markers. <input type="number" id="markerSize" min="0" max="200" value="0" class="num"></label>
+        <label class="slider" title="Trace on a marker measures it. Calibrate or lasso the plot area first so axis text is not mistaken for markers.">Marker size (px, 0 = auto) <input type="number" id="markerSize" min="0" max="200" value="0" class="num"></label>
         <div class="auto-row">
           <button class="btn small" id="eyedropper">Pick colour</button>
           <span id="colorSwatch" class="swatch"></span>
@@ -111,10 +114,12 @@
         <label class="slider">X step (px) <span id="stepVal">8</span>
           <input type="range" id="xstep" min="1" max="15" value="8">
         </label>
-        <label class="slider">Same-coloured curves <input type="number" id="nCurves" min="1" max="12" value="1" class="num"></label>
-        <label class="chk" title="Turns off everything added on top of the original tracer: click seeding, path search, curve counting, ordering, ink claims, bridging"><input type="checkbox" id="classic"> Classic tracer (original single-curve method)</label>
-        <label class="chk"><input type="checkbox" id="keepOrder" checked> Curves never cross (keep their order; uses curves already digitized)</label>
-        <label class="slider">Bridge dashed gaps up to (px, 0 = off) <input type="number" id="bridge" min="0" max="200" value="40" class="num"></label>
+        <label class="chk" title="Click seeding, path search through dashed / dotted curves, curve counting, ordering and bridging. Off = the original tracer."><input type="checkbox" id="advanced"> Advanced tracer</label>
+        <div id="advOpts" hidden>
+          <label class="slider">Same-coloured curves <input type="number" id="nCurves" min="1" max="12" value="1" class="num"></label>
+          <label class="chk"><input type="checkbox" id="keepOrder" checked> Curves never cross (keep order)</label>
+          <label class="slider">Bridge dashed gaps up to (px, 0 = off) <input type="number" id="bridge" min="0" max="200" value="40" class="num"></label>
+        </div>
         <button class="btn small primary" id="runAuto">Run auto extract</button>
         <button class="btn small" id="runRegions" title="Run on every series that has a lasso region, one curve each">Run on all regions / bounds</button>
       </details>
@@ -160,6 +165,6 @@
   <div id="dataTableWrap"><table id="dataTable"></table></div>
 </div>
 
-<script src="app.js?v=12"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>
