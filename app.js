@@ -405,7 +405,7 @@ function bgRGB(){
 function setAutoColor(col){ state.autoColor=col; $("colorSwatch").style.background=`rgb(${col.r},${col.g},${col.b})`; }
 // Trace tool. A click is only accurate to a few screen pixels, which is many image pixels when zoomed out, so:
 // look within 10 *screen* px of the click, snap to the nearest clearly-inked pixel, take the colour there, and
-// start the trace from that snapped spot. Each trace goes into a fresh series if the active one already has points.
+// start the trace from that snapped spot (into the active series).
 function traceAt(px,py){
   if(!state.imgData){ alert("Load an image first."); return; }
   const {data,width:W,height:H}=state.imgData, bg=bgRGB();
@@ -429,15 +429,9 @@ function traceAt(px,py){
   const tol=Math.round(Math.max(40,Math.min(140,0.45*Math.sqrt(bc/3))));
   $("tolerance").value=tol; $("tolVal").textContent=tol;
   if($("autoKind").value==="markers"){ const m=measureMarker(bx,by); if(m) $("markerSize").value=m; }
-  const cur=state.series[state.active], created=!cur || cur.points.length>0;
-  if(created) addSeries();
+  if(!state.series[state.active]) addSeries();
   state.hint={px:bx,py:by};
-  try{ $("runAuto").onclick(); }
-  finally {
-    state.hint=null;
-    const fresh=state.series[state.active];
-    if(created && fresh && !fresh.points.length) deleteSeries(state.active);   // failed: don't leave an empty series behind
-  }
+  try{ $("runAuto").onclick(); } finally { state.hint=null; }
 }
 // nearest pixel of the picked colour within a small radius, refined to the centre of its stroke
 function snapPoint(px,py){
@@ -777,7 +771,8 @@ function traceCurves(ser, n, overwritten){
   //    `maxGap` columns lets it cross the gaps of dashed / dotted lines on its own momentum. Curves are
   //    extracted one after another and each claims its ink, so two curves can never share the same ink.
   const maxGap=Math.max(2,Math.ceil(Math.max(+$("bridge").value,40)/step)+1);
-  const SKIP=0.15, R_COL=1.2, W_TH=0.4, W_ACC=8, W_SUP=10, P_SHARE=6, BEAM=40;   // R_COL: reward per column advanced, so a curve keeps going
+  // R_COL: reward per column advanced (a curve keeps going), R_USE: small reward per cluster actually used (denser paths)
+  const SKIP=0.2, R_COL=6, R_USE=0.5, W_TH=0.4, W_ACC=8, W_SUP=10, P_SHARE=6, BEAM=40;   // R_COL: reward per column advanced, so a curve keeps going
   const hit=(x,y)=>{
     if(x<0||y<0||x>=W||y>=H||(mask&&!mask[y*W+x])) return false;
     const i=(y*W+x)*4, dr=data[i]-tr, dg=data[i+1]-tg, db=data[i+2]-tb; return dr*dr+dg*dg+db*db<=tol2;
@@ -827,7 +822,7 @@ function traceCurves(ser, n, overwritten){
             if(claimed[j][bi] && b.n<=2.5*seed.n) loc+=P_SHARE;                         // ink another curve already uses
             if(below && below[j]!==undefined && b.c-b.n/2>below[j]+1) loc+=3+0.5*(b.c-b.n/2-below[j]-1);
             if(above && above[j]!==undefined && b.c+b.n/2<above[j]-1) loc+=3+0.5*(above[j]-1-b.c-b.n/2);   // curves keep their order (a merged blob may reach down to this curve)
-            const c=e.cost+loc+SKIP*(g-1)-R_COL*g;
+            const c=e.cost+loc+SKIP*(g-1)-R_COL*g-R_USE;
             add(j,{k:j,ci:bi,cl:b,parent:e,cost:c,count:e.count+1,th:0.8*e.th+0.2*b.n/Math.sqrt(1+s2*s2),loc});
           }
         }
@@ -896,10 +891,53 @@ function traceCurves(ser, n, overwritten){
   if(!out.length){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
   return out;
 }
+// The original single-curve tracer (no seeding at the click, no path search, no ordering): per column the ink
+// is clustered, it starts on the thickest cluster of the first column that has ink, then follows whichever
+// cluster is closest to the previous point. Still limited to the series' region / calibrated box.
+function traceClassic(ser){
+  const tol=+$("tolerance").value, step=+$("xstep").value;
+  const {data,width:W}=state.imgData, tol2=tol*tol*3;
+  const {r:tr,g:tg,b:tb}=state.autoColor, gap=2;
+  const {x0,x1,y0,y1,mask}=regionOf(ser);
+  const maxThick=Math.max(15,(y1-y0)*0.5);
+  const cols=[];
+  for(let x=x0;x<=x1;x+=step){
+    const clusters=[]; let s=null,p=null;
+    for(let y=y0;y<=y1;y++){
+      const i=y*W+x;
+      if(mask && !mask[i]) continue;
+      const dr=data[i*4]-tr, dg=data[i*4+1]-tg, db=data[i*4+2]-tb;
+      if(dr*dr+dg*dg+db*db<=tol2){
+        if(s===null){ s=y; p=y; } else if(y-p<=gap){ p=y; } else { clusters.push({c:(s+p)/2,n:p-s+1}); s=y; p=y; }
+      }
+    }
+    if(s!==null) clusters.push({c:(s+p)/2,n:p-s+1});
+    cols.push({x,clusters:clusters.filter(cl=>cl.n<=maxThick)});
+  }
+  const withC=cols.filter(c=>c.clusters.length);
+  if(!withC.length){ alert("No matching pixels found. Raise the tolerance or re-pick the colour."); return null; }
+  let lastY=withC[0].clusters.reduce((a,b)=>b.n>a.n?b:a).c;
+  const maxJump=Math.max(10,(y1-y0)*0.25), THICK_GAIN=6, pts=[];
+  for(const col of cols){
+    if(!col.clusters.length) continue;
+    let best=null, bs=-Infinity;
+    for(const cl of col.clusters){
+      const d=Math.abs(cl.c-lastY); if(d>maxJump) continue;
+      const score=cl.n*THICK_GAIN-d; if(score>bs){ bs=score; best=cl; }
+    }
+    if(best){ pts.push({px:col.x,py:best.c}); lastY=best.c; }
+  }
+  if(pts.length<2){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
+  return pts;
+}
+
 // Trace into series `si`; extra curves go into the following series (created if missing).
 function extractInto(si, n){
   const markers=$("autoKind").value==="markers";
-  const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean) : traceCurves(state.series[si], n, state.series.slice(si,si+n));
+  const classic=$("classic").checked;
+  const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean)
+    : classic ? [traceClassic(state.series[si])].filter(Boolean)
+    : traceCurves(state.series[si], n, state.series.slice(si,si+n));
   if(!tracks||!tracks.length) return false;
   const act=state.active;
   tracks.forEach((pts,k)=>{
@@ -1214,6 +1252,26 @@ async function ocrFill(keys){
   } catch(err){ st.textContent=""; alert(err.message||err); }
 }
 $("ocrBtn").onclick=()=>ocrFill(["X1","X2","Y1","Y2"].filter(k=>state.cal[k]));
+
+// ============================================================ layout: resizable sidebar, collapsible panels
+(function(){
+  const app=$("app"), rz=$("sbResize");
+  const set=w=>{ w=Math.max(280,Math.min(760,w)); app.style.setProperty("--sbw",w+"px"); return w; };
+  try{ const w=+localStorage.getItem("gd.sbw"); if(w) set(w); }catch(e){}
+  let drag=false;
+  rz.addEventListener("mousedown",e=>{ drag=true; e.preventDefault(); document.body.style.cursor="col-resize"; });
+  window.addEventListener("mousemove",e=>{ if(drag){ const w=set(e.clientX); try{ localStorage.setItem("gd.sbw",w); }catch(_){} } });
+  window.addEventListener("mouseup",()=>{ if(drag){ drag=false; document.body.style.cursor=""; } });
+  document.querySelectorAll(".panel > h2").forEach(h=>{
+    h.title="Click to collapse / expand";
+    const id="gd.panel."+h.textContent.trim();
+    try{ if(localStorage.getItem(id)==="1") h.parentElement.classList.add("collapsed"); }catch(e){}
+    h.addEventListener("click",()=>{
+      const c=h.parentElement.classList.toggle("collapsed");
+      try{ localStorage.setItem(id,c?"1":"0"); }catch(e){}
+    });
+  });
+})();
 
 // ============================================================ init
 addSeries(); setMode("points"); updateCalibStatus();
