@@ -992,10 +992,15 @@ function traceCurves(ser, n, overwritten){
   if(!out.length){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
   return out;
 }
-// The original single-curve tracer (no seeding at the click, no path search, no ordering): per column the ink
-// is clustered, it starts on the thickest cluster of the first column that has ink, then follows whichever
-// cluster is closest to the previous point. Still limited to the series' region / calibrated box.
-function traceClassic(ser){
+// The classic tracer (what runs unless "Advanced tracer" is ticked): per column the ink is clustered, then
+//  - one curve: start on the thickest cluster of the first column that has ink and follow whichever cluster is
+//    closest to the previous point;
+//  - several same-coloured curves: start from the column where the n thickest clusters are strongest, follow
+//    each curve outward by matching clusters to curves greedily (thickness minus distance from the curve's
+//    extrapolated path), and let curves coast through crossings where their ink merges;
+// then no two curves keep a point in the same spot, and gaps up to the "bridge" length are filled by straight
+// interpolation. No seeding at the click, no path search, no ordering. Returns a list of point lists or null.
+function traceClassic(ser, n){
   const tol=+$("tolerance").value, step=+$("xstep").value;
   const {data,width:W}=state.imgData, tol2=tol*tol*3;
   const {r:tr,g:tg,b:tb}=state.autoColor, gap=2;
@@ -1017,19 +1022,73 @@ function traceClassic(ser){
   }
   const withC=cols.filter(c=>c.clusters.length);
   if(!withC.length){ alert("No matching pixels found. Raise the tolerance or re-pick the colour."); return null; }
-  let lastY=withC[0].clusters.reduce((a,b)=>b.n>a.n?b:a).c;
-  const maxJump=Math.max(10,(y1-y0)*0.25), THICK_GAIN=6, pts=[];
-  for(const col of cols){
-    if(!col.clusters.length) continue;
-    let best=null, bs=-Infinity;
-    for(const cl of col.clusters){
-      const d=Math.abs(cl.c-lastY); if(d>maxJump) continue;
-      const score=cl.n*THICK_GAIN-d; if(score>bs){ bs=score; best=cl; }
+  const maxJump=Math.max(10,(y1-y0)*0.25), THICK_GAIN=6;
+  let tracks;
+  if(n<=1){
+    let lastY=withC[0].clusters.reduce((a,b)=>b.n>a.n?b:a).c; const pts=[];
+    for(const col of cols){
+      if(!col.clusters.length) continue;
+      let best=null, bs=-Infinity;
+      for(const cl of col.clusters){
+        const d=Math.abs(cl.c-lastY); if(d>maxJump) continue;
+        const score=cl.n*THICK_GAIN-d; if(score>bs){ bs=score; best=cl; }
+      }
+      if(best){ pts.push({px:col.x,py:best.c}); lastY=best.c; }
     }
-    if(best){ pts.push({px:col.x,py:best.c}); lastY=best.c; }
+    tracks=[pts];
+  } else {
+    const top=col=>col.clusters.slice().sort((a,b)=>b.n-a.n).slice(0,n);
+    const score=col=>(col.clusters.length>=n?1e6:0)+top(col).reduce((s,c)=>s+c.n,0);
+    let si=0, bs=-1;
+    cols.forEach((col,i)=>{ const sc=score(col); if(sc>bs){ bs=sc; si=i; } });
+    const seeds=top(cols[si]).sort((a,b)=>a.c-b.c).map(cl=>({x:cols[si].x,y:cl.c,n:cl.n}));
+    const follow=order=>{
+      const T=seeds.map(s=>({x:s.x,y:s.y,vy:0,th:s.n,pts:[]}));
+      for(const col of order){
+        const pred=T.map(t=>t.y+t.vy*(col.x-t.x));
+        // a cluster much thicker than the curves, spanning 2+ predictions, is a crossing: those curves coast
+        const coast=new Set(), dead=new Set();
+        col.clusters.forEach((cl,ci)=>{
+          const in_=T.map((t,ti)=>ti).filter(ti=>Math.abs(pred[ti]-cl.c)<=cl.n/2+2);
+          if(in_.length>=2 && cl.n>1.3*Math.max(...in_.map(ti=>T[ti].th))){ in_.forEach(ti=>coast.add(ti)); dead.add(ci); }
+        });
+        const pairs=[];
+        T.forEach((t,ti)=>{
+          if(coast.has(ti)) return;
+          col.clusters.forEach((cl,ci)=>{ if(dead.has(ci)) return; const d=Math.abs(cl.c-pred[ti]); if(d<=maxJump) pairs.push({ti,ci,s:THICK_GAIN*cl.n-d}); });
+        });
+        pairs.sort((a,b)=>b.s-a.s);
+        const ut=new Set(), uc=new Set();
+        for(const p of pairs){
+          if(ut.has(p.ti)||uc.has(p.ci)) continue;
+          ut.add(p.ti); uc.add(p.ci);
+          const t=T[p.ti], cl=col.clusters[p.ci];
+          t.vy=0.5*t.vy+0.5*(cl.c-t.y)/(col.x-t.x); t.th=0.8*t.th+0.2*cl.n;
+          t.x=col.x; t.y=cl.c; t.pts.push({px:col.x,py:cl.c});
+        }
+        coast.forEach(ti=>{ const t=T[ti]; t.x=col.x; t.y=pred[ti]; t.pts.push({px:col.x,py:pred[ti],coast:true}); });
+      }
+      return T.map(t=>t.pts);
+    };
+    const right=follow(cols.slice(si+1)), left=follow(cols.slice(0,si).reverse());
+    tracks=seeds.map((s,k)=>[...left[k].reverse(),{px:s.x,py:s.y},...right[k]]);
+    // never two curves in the same spot: keep the real measurement over a coasted one, else the first curve's
+    const minSep=Math.max(2,0.6*Math.min(...seeds.map(s=>s.n))), byX=new Map(), drop=new Set();
+    tracks.forEach(pts=>pts.forEach(p=>{ const a=byX.get(p.px)||[]; a.push(p); byX.set(p.px,a); }));
+    byX.forEach(list=>{ for(let a=0;a<list.length;a++) for(let b=a+1;b<list.length;b++){
+      const A=list[a], B=list[b]; if(drop.has(A)||drop.has(B)||Math.abs(A.py-B.py)>=minSep) continue;
+      drop.add(A.coast&&!B.coast ? A : B); } });
+    tracks=tracks.map(pts=>pts.filter(p=>!drop.has(p)));
   }
-  if(pts.length<2){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
-  return pts;
+  const bridge=+$("bridge").value;
+  const fill=pts=>{ if(!bridge||!pts.length) return pts; const o=[pts[0]];
+    for(let i=1;i<pts.length;i++){ const a=pts[i-1], b=pts[i], dx=b.px-a.px;
+      if(dx>step*1.5 && dx<=bridge) for(let x=a.px+step;x<b.px;x+=step) o.push({px:x,py:a.py+(b.py-a.py)*(x-a.px)/dx});
+      o.push(b); }
+    return o; };
+  tracks=tracks.filter(p=>p.length>=2).map(fill);
+  if(!tracks.length){ alert("Couldn't trace a continuous curve. Try a different tolerance / colour, or place points by hand."); return null; }
+  return tracks;
 }
 
 // Trace into series `si`; extra curves go into the following series (created if missing).
@@ -1037,7 +1096,7 @@ function extractInto(si, n){
   const markers=$("autoKind").value==="markers";
   const classic=!$("advanced").checked;
   const tracks=markers ? [detectMarkers(state.series[si])].filter(Boolean)
-    : classic ? [traceClassic(state.series[si])].filter(Boolean)
+    : classic ? traceClassic(state.series[si], n)
     : traceCurves(state.series[si], n, state.series.slice(si,si+n));
   if(!tracks||!tracks.length) return false;
   const act=state.active;
@@ -1056,7 +1115,7 @@ function autoPrecheck(){
 $("runAuto").onclick = ()=>{
   if(!autoPrecheck()) return;
   if(!state.series[state.active]){ alert("Add a series first."); return; }
-  const n=($("autoKind").value==="markers"||!$("advanced").checked) ? 1 : Math.max(1,Math.min(12,Math.round(+$("nCurves").value)||1));
+  const n=$("autoKind").value==="markers" ? 1 : Math.max(1,Math.min(12,Math.round(+$("nCurves").value)||1));
   const clobber=state.series.slice(state.active+1,state.active+n).some(s=>s.points.length);
   if(clobber && !confirm("Extra curves are written into the next series, replacing their points. Continue?")) return;
   extractInto(state.active,n);
