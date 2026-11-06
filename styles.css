@@ -141,3 +141,7 @@ details#boundBox summary{cursor:pointer;font-size:12px;color:var(--accent)}
 #selCount{font-size:12px;color:#ffe14d}
 #canvas.mode-select{cursor:crosshair}
 #canvas.mode-brush{cursor:none}
+
+/* --- v10: viewport-sized canvas (a spacer provides the scrollbars) --- */
+#spacer{position:absolute;left:0;top:0;pointer-events:none}
+#canvasHost{position:sticky;left:0;top:0;width:100%;overflow:hidden}

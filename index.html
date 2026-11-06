@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Graph Digitizer</title>
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 </head>
 <body>
 <header id="topbar">
@@ -155,7 +155,8 @@
       <span id="cursorReadout" class="readout">&mdash;</span>
     </div>
     <div id="canvasWrap">
-      <canvas id="canvas"></canvas>
+      <div id="spacer"></div>
+      <div id="canvasHost"><canvas id="canvas"></canvas></div>
       <div id="placeholder">Load an image to begin.</div>
     </div>
     <canvas id="loupe" width="150" height="150"></canvas>
@@ -167,6 +168,6 @@
   <div id="dataTableWrap"><table id="dataTable"></table></div>
 </div>
 
-<script src="app.js?v=15"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

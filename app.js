@@ -68,32 +68,58 @@ window.addEventListener("paste", e => {
 });
 
 // ============================================================ zoom / render
-function setZoom(s){
+// The canvas is only as big as the visible area (a spacer div provides the scrollbars), and only that part of
+// the image is drawn, so zooming in costs the same at 800% as at 100%. Everything is drawn in "scaled image"
+// coordinates (natural px * scale) under a translate by the scroll offset.
+const spacer = $("spacer"), host = $("canvasHost");
+let renderQueued=false;
+function requestRender(){ if(renderQueued) return; renderQueued=true; requestAnimationFrame(()=>{ renderQueued=false; render(); }); }
+// zoom keeping the image point under (cx,cy) (client coords; default: the centre of the view) where it is
+function setZoom(s, cx, cy){
   if(!state.img) return;
+  const r=wrap.getBoundingClientRect(), old=state.scale;
+  if(cx===undefined){ cx=r.left+wrap.clientWidth/2; cy=r.top+wrap.clientHeight/2; }
+  const nx=(cx-r.left+wrap.scrollLeft)/old, ny=(cy-r.top+wrap.scrollTop)/old;
   state.scale = Math.min(8, Math.max(0.05, s));
-  canvas.width  = Math.round(state.img.naturalWidth  * state.scale);
-  canvas.height = Math.round(state.img.naturalHeight * state.scale);
+  spacer.style.width  = Math.round(state.img.naturalWidth  * state.scale)+"px";
+  spacer.style.height = Math.round(state.img.naturalHeight * state.scale)+"px";
+  wrap.scrollLeft = Math.max(0,nx*state.scale-(cx-r.left));
+  wrap.scrollTop  = Math.max(0,ny*state.scale-(cy-r.top));
   $("zoomLabel").textContent = Math.round(state.scale*100)+"%";
-  render();
+  requestRender();
 }
 function zoomFit(){
   if(!state.img) return;
   const pad = 24;
   setZoom(Math.min((wrap.clientWidth-pad)/state.img.naturalWidth,(wrap.clientHeight-pad)/state.img.naturalHeight,1));
+  wrap.scrollLeft=0; wrap.scrollTop=0;
 }
 $("zoomIn").onclick  = () => setZoom(state.scale*1.25);
 $("zoomOut").onclick = () => setZoom(state.scale/1.25);
 $("zoomFit").onclick = zoomFit;
 wrap.addEventListener("wheel", e => {
   if(!state.img) return;
-  if(e.ctrlKey || e.metaKey){ e.preventDefault(); setZoom(state.scale*(e.deltaY<0?1.1:0.9)); }
+  if(e.ctrlKey || e.metaKey){ e.preventDefault(); setZoom(state.scale*(e.deltaY<0?1.1:0.9), e.clientX, e.clientY); }
 }, { passive:false });
+wrap.addEventListener("scroll", requestRender);
+new ResizeObserver(requestRender).observe(wrap);
 
 function render(){
   if(!state.img) return;
   const s = state.scale, c = state.cal;
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.drawImage(state.img, 0, 0, canvas.width, canvas.height);
+  const vw=wrap.clientWidth, vh=wrap.clientHeight, sx=wrap.scrollLeft, sy=wrap.scrollTop;
+  const NW=state.img.naturalWidth, NH=state.img.naturalHeight, CW=NW*s, CH=NH*s;
+  if(canvas.width!==vw || canvas.height!==vh){ canvas.width=vw; canvas.height=vh; }
+  host.style.height=vh+"px";
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,vw,vh);
+  // only the visible slice of the image; pixelated once zoomed in far enough to see pixels
+  const ix0=Math.max(0,sx/s), iy0=Math.max(0,sy/s), ix1=Math.min(NW,(sx+vw)/s), iy1=Math.min(NH,(sy+vh)/s);
+  if(ix1>ix0 && iy1>iy0){
+    ctx.imageSmoothingEnabled = s<2;
+    ctx.drawImage(state.img, ix0, iy0, ix1-ix0, iy1-iy0, ix0*s-sx, iy0*s-sy, (ix1-ix0)*s, (iy1-iy0)*s);
+  }
+  ctx.setTransform(1,0,0,1,-sx,-sy);
 
   if(state.cornerMode){
     if(c.X1) drawCross(c.X1.px*s, c.X1.py*s, "#f7b32b", "BL");
@@ -108,9 +134,9 @@ function render(){
     for(const k of ["X1","X2","Y1","Y2"]){ if(c[k]) drawCross(c[k].px*s, c[k].py*s, calColors[k], k); }
     ctx.setLineDash([5,5]); ctx.lineWidth=1;
     if(c.X1 && c.X2){ ctx.strokeStyle="rgba(255,92,114,.5)";
-      line(c.X1.px*s,0,c.X1.px*s,canvas.height); line(c.X2.px*s,0,c.X2.px*s,canvas.height); }
+      line(c.X1.px*s,0,c.X1.px*s,CH); line(c.X2.px*s,0,c.X2.px*s,CH); }
     if(c.Y1 && c.Y2){ ctx.strokeStyle="rgba(38,194,129,.5)";
-      line(0,c.Y1.py*s,canvas.width,c.Y1.py*s); line(0,c.Y2.py*s,canvas.width,c.Y2.py*s); }
+      line(0,c.Y1.py*s,CW,c.Y1.py*s); line(0,c.Y2.py*s,CW,c.Y2.py*s); }
     ctx.setLineDash([]);
   }
 
@@ -286,7 +312,7 @@ function updateCalibStatus(){
 // ============================================================ canvas interaction
 function canvasToNatural(e){
   const r = canvas.getBoundingClientRect();
-  return { px:(e.clientX-r.left)/state.scale, py:(e.clientY-r.top)/state.scale };
+  return { px:(e.clientX-r.left+wrap.scrollLeft)/state.scale, py:(e.clientY-r.top+wrap.scrollTop)/state.scale };
 }
 let panning=false, panStart=null, justDragged=false;
 canvas.addEventListener("mousedown", e => {
