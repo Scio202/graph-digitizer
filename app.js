@@ -97,9 +97,20 @@ function zoomFit(){
 $("zoomIn").onclick  = () => setZoom(state.scale*1.25);
 $("zoomOut").onclick = () => setZoom(state.scale/1.25);
 $("zoomFit").onclick = zoomFit;
+// Ctrl+wheel and trackpad pinch (which browsers report as a stream of ctrl+wheel events with small deltas):
+// the zoom factor follows the size of each delta, and the events of one frame are merged into a single zoom,
+// so a fast pinch costs one layout + redraw per frame instead of one per event.
+let zoomPending=null;
+function applyZoom(){ const z=zoomPending; zoomPending=null; if(z){ setZoom(z.s,z.cx,z.cy); render(); } }
 wrap.addEventListener("wheel", e => {
   if(!state.img) return;
-  if(e.ctrlKey || e.metaKey){ e.preventDefault(); setZoom(state.scale*(e.deltaY<0?1.1:0.9), e.clientX, e.clientY); }
+  if(e.ctrlKey || e.metaKey){
+    e.preventDefault();
+    const dy=e.deltaMode===1 ? e.deltaY*16 : e.deltaY;
+    const f=Math.exp(-dy*(Math.abs(dy)<40 ? 0.012 : 0.0025));          // pinch deltas are small, wheel notches ~100
+    if(!zoomPending){ zoomPending={s:state.scale}; requestAnimationFrame(applyZoom); }
+    zoomPending.s=Math.min(8,Math.max(0.05,zoomPending.s*f)); zoomPending.cx=e.clientX; zoomPending.cy=e.clientY;
+  }
 }, { passive:false });
 wrap.addEventListener("scroll", requestRender);
 new ResizeObserver(requestRender).observe(wrap);
